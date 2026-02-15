@@ -71,12 +71,14 @@ beforeEach(async () => {
 });
 
 describe("Dashboard", () => {
-  it("shows loading state while fetching tickets", () => {
+  it("shows empty container while fetching tickets", () => {
     mockUseTickets.mockReturnValue({ tickets: [], loading: true, error: null });
 
-    render(<Dashboard />);
+    const { container } = render(<Dashboard />);
 
-    expect(screen.getByText("Loading dashboard...")).toBeInTheDocument();
+    // Loading state renders an empty container (no stats, no error)
+    expect(container.querySelector("[data-testid='stats-grid']")).not.toBeInTheDocument();
+    expect(screen.queryByText("Database connection failed")).not.toBeInTheDocument();
   });
 
   it("shows error message when ticket fetch fails", () => {

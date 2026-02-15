@@ -3,7 +3,6 @@ import { useCallback } from "react";
 import { useTickets, useActiveRalphSessions, useDashboardAnalytics } from "../lib/hooks";
 import { StatsGrid, AnalyticsSection } from "../components/dashboard";
 import type { StatFilter } from "../components/dashboard";
-
 export const Route = createFileRoute("/dashboard")({
   component: Dashboard,
   errorComponent: DashboardError,
@@ -88,11 +87,7 @@ function Dashboard() {
   } = useDashboardAnalytics();
 
   if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <p className="text-[var(--text-secondary)]">Loading dashboard...</p>
-      </div>
-    );
+    return <div className="h-full" />;
   }
 
   if (error) {
@@ -151,7 +146,7 @@ function Dashboard() {
   );
 
   return (
-    <div style={containerStyles}>
+    <div style={containerStyles} className="route-fade-in">
       <h1 style={titleStyles}>Dashboard</h1>
 
       <StatsGrid

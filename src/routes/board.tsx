@@ -16,7 +16,6 @@ import { getStatusLabel } from "../lib/constants";
 import { KanbanBoard } from "../components/board/KanbanBoard";
 import { getTicket } from "../api/tickets";
 import { createBrowserLogger } from "../lib/browser-logger";
-
 export const Route = createFileRoute("/board")({
   component: Board,
 });
@@ -129,11 +128,7 @@ function Board() {
   };
 
   if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <p className="text-[var(--text-secondary)]">Loading tickets...</p>
-      </div>
-    );
+    return <div className="h-full" />;
   }
 
   if (error) {
@@ -145,7 +140,7 @@ function Board() {
   }
 
   return (
-    <div style={boardContainerStyles}>
+    <div style={boardContainerStyles} className="route-fade-in">
       {/* Board Header with filters */}
       {viewMode === "kanban" && (
         <BoardHeader
