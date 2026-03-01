@@ -99,6 +99,7 @@ export {
   listTickets,
   getTicket,
   updateTicketStatus,
+  updateTicket,
   updateAcceptanceCriterion,
   deleteTicket,
   updateAttachmentMetadata,
@@ -107,6 +108,7 @@ export {
 
 export type {
   CreateTicketParams,
+  UpdateTicketParams,
   ListTicketsFilters,
   TicketSummary,
   CriterionStatus,
@@ -127,9 +129,15 @@ export { createEpic, listEpics, updateEpic, deleteEpic } from "./epic.ts";
 export type { CreateEpicParams, UpdateEpicParams } from "./epic.ts";
 
 // Comment business logic
-export { addComment, listComments } from "./comment.ts";
+export { addComment, listComments, getActivityLog } from "./comment.ts";
 
-export type { AddCommentParams, CommentAuthor, CommentType } from "./comment.ts";
+export type {
+  AddCommentParams,
+  CommentAuthor,
+  CommentType,
+  ActivityLogEntry,
+  GetActivityLogParams,
+} from "./comment.ts";
 
 // Review & demo business logic
 export {
@@ -216,6 +224,11 @@ export type {
   ListTelemetrySessionsParams,
   TelemetrySessionSummary,
 } from "./telemetry.ts";
+
+// Search business logic
+export { searchTickets } from "./search.ts";
+
+export type { SearchParams, SearchResult } from "./search.ts";
 
 // JSON utilities
 export { safeJsonParse } from "./json.ts";

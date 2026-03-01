@@ -42,7 +42,12 @@
  *   brain-dump backup --list          (backward compat)
  */
 
+import { execFile } from "child_process";
+import { existsSync, readFileSync } from "fs";
+import { request } from "http";
+import { basename, resolve, join } from "path";
 import * as admin from "./commands/admin.ts";
+import * as project from "./commands/project.ts";
 import * as ticket from "./commands/ticket.ts";
 import * as epic from "./commands/epic.ts";
 import * as workflow from "./commands/workflow.ts";
@@ -56,26 +61,47 @@ import * as tasks from "./commands/tasks.ts";
 import * as compliance from "./commands/compliance.ts";
 import * as settings from "./commands/settings.ts";
 import * as transfer from "./commands/transfer.ts";
-import { outputError } from "./lib/output.ts";
+import * as status from "./commands/status.ts";
+import * as search from "./commands/search.ts";
+import * as context from "./commands/context.ts";
+import * as log from "./commands/log.ts";
+import * as completions from "./commands/completions.ts";
+import { outputResult, outputError, showResourceHelp } from "./lib/output.ts";
+import {
+  getResources,
+  getResourceDescription,
+  getCommandsForResource,
+} from "./lib/command-registry.ts";
+import { suggestClosest } from "./lib/suggest.ts";
+import { parseFlags, optionalFlag, boolFlag } from "./lib/args.ts";
+import { findProjectByPath, createProject } from "../core/index.ts";
+import { getDb } from "./lib/db.ts";
 
-const RESOURCES = [
-  "ticket",
-  "epic",
-  "workflow",
-  "comment",
-  "review",
-  "session",
-  "git",
-  "telemetry",
-  "files",
-  "tasks",
-  "compliance",
-  "settings",
-  "transfer",
-  "admin",
-];
+const RESOURCES = getResources();
+
+/** All valid resource names (excluding _top pseudo-resource). */
+const RESOURCE_NAMES = RESOURCES.filter((r) => r !== "_top");
 
 function showHelp(): void {
+  const maxLen = Math.max(...RESOURCE_NAMES.map((r) => r.length));
+  const resourceLines = RESOURCE_NAMES.map(
+    (r) => `  ${r.padEnd(maxLen + 2)}${getResourceDescription(r)}`
+  ).join("\n");
+
+  // Generate top-level commands from _top entries in the registry
+  const topCommands = getCommandsForResource("_top");
+  const topParts = topCommands.map((cmd) => {
+    const flagHints = cmd.flags
+      .filter((f) => f.name !== "pretty")
+      .map((f) =>
+        f.required ? `--${f.name} <${f.type === "number" ? "n" : "value"}>` : `[--${f.name}]`
+      )
+      .join(" ");
+    return { left: `  brain-dump ${cmd.action} ${flagHints}`.trimEnd(), desc: cmd.description };
+  });
+  const maxTop = Math.max(...topParts.map((p) => p.left.length));
+  const topLines = topParts.map((p) => `${p.left.padEnd(maxTop + 2)}${p.desc}`).join("\n");
+
   console.log(`
 Brain Dump CLI - Full resource management and database utilities
 
@@ -83,20 +109,10 @@ Usage:
   brain-dump <resource> <action> [--flags]
 
 Resources:
-  ticket       Create, list, get, update, delete tickets
-  epic         Create, list, update, delete epics
-  workflow     Start work, complete work, start epic
-  comment      Add and list ticket comments
-  review       Submit findings, generate demos, manage reviews
-  session      Create, update, complete Ralph sessions
-  git          Link commits, PRs, sync ticket links
-  telemetry    Start, end, get, list telemetry sessions
-  files        Link files to tickets, find tickets by file
-  tasks        Save, get, clear Claude task lists
-  compliance   Conversation logging for compliance auditing
-  settings     Get and update project settings
-  transfer     Export and import .braindump archives
-  admin        Backup, restore, check, doctor, health
+${resourceLines}
+
+Top-level commands:
+${topLines}
 
 Backward-compatible shortcuts:
   brain-dump backup [--list]       Same as: brain-dump admin backup [--list]
@@ -148,8 +164,86 @@ function backwardArgs(): string[] {
   return action ? [action, ...rest] : rest;
 }
 
+function handleOpen(): void {
+  const openArgs = [action, ...rest];
+  const portFlag = openArgs.find((_, i) => openArgs[i - 1] === "--port");
+  const port = portFlag ? parseInt(portFlag, 10) : 4242;
+  const url = `http://localhost:${port}/`;
+
+  // Health check before opening
+  const healthReq = request(url, { method: "HEAD", timeout: 2000 }, (res) => {
+    if (res.statusCode && res.statusCode < 500) {
+      openBrowser(url);
+    } else {
+      console.error(`Server responded with status ${res.statusCode}.`);
+      process.exit(1);
+    }
+  });
+  healthReq.on("error", () => {
+    console.error(`Dev server not running at ${url}. Start it with: pnpm dev`);
+    process.exit(1);
+  });
+  healthReq.end();
+}
+
+function openBrowser(url: string): void {
+  const platform = process.platform;
+  const cmd = platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
+  const cmdArgs = platform === "win32" ? ["/c", "start", url] : [url];
+
+  execFile(cmd, cmdArgs, (err) => {
+    if (err) {
+      console.error(`Failed to open browser: ${err.message}`);
+      console.error(`Open manually: ${url}`);
+    }
+  });
+}
+
+function handleInit(): void {
+  const initArgs = [action, ...rest].filter(Boolean);
+  const flags = parseFlags(initArgs);
+  const pretty = boolFlag(flags, "pretty");
+  const { db } = getDb();
+  const cwd = resolve(process.cwd());
+
+  try {
+    // Check if already registered
+    const existing = findProjectByPath(db, cwd);
+    if (existing) {
+      outputResult({ ...existing, alreadyRegistered: true }, pretty);
+      return;
+    }
+
+    // Resolve name: --name flag → package.json name → directory basename
+    let name = optionalFlag(flags, "name");
+    if (!name) {
+      const pkgPath = join(cwd, "package.json");
+      if (existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { name?: string };
+          if (pkg.name) name = pkg.name;
+        } catch {
+          // ignore parse errors, fall through to basename
+        }
+      }
+    }
+    if (!name) {
+      name = basename(cwd);
+    }
+
+    const color = optionalFlag(flags, "color");
+    const result = createProject(db, { name, path: cwd, color });
+    outputResult(result, pretty);
+  } catch (e) {
+    outputError(e);
+  }
+}
+
 switch (resource) {
   // ── Resource-based routing ──────────────────────────────────
+  case "project":
+    runSync(project.handle, action, rest);
+    break;
   case "ticket":
     runSync(ticket.handle, action, rest);
     break;
@@ -193,6 +287,29 @@ switch (resource) {
     runAsync(admin.handle, action, rest);
     break;
 
+  // ── Top-level power commands ─────────────────────────────────
+  case "open":
+    handleOpen();
+    break;
+  case "init":
+    handleInit();
+    break;
+  case "status":
+    status.handle(action, rest);
+    break;
+  case "search":
+    search.handle(action, rest);
+    break;
+  case "context":
+    context.handle(action, rest);
+    break;
+  case "log":
+    log.handle(action, rest);
+    break;
+  case "completions":
+    completions.handle(action, rest);
+    break;
+
   // ── Backward compatibility (top-level commands) ─────────────
   case "export":
     // brain-dump export --epic <id>  → transfer export-epic
@@ -224,13 +341,52 @@ switch (resource) {
   case "--help":
   case "-h":
   case undefined:
-    showHelp();
+    // brain-dump help <resource> → show resource-specific help
+    if (resource === "help" && action && action !== "--help") {
+      if (RESOURCE_NAMES.includes(action)) {
+        showResourceHelp(action);
+      } else {
+        const suggestion = suggestClosest(action, RESOURCE_NAMES);
+        console.error(`Unknown resource: ${action}`);
+        if (suggestion) {
+          console.error(`\nDid you mean: ${suggestion}?`);
+        }
+        console.error(`\nAvailable resources: ${RESOURCE_NAMES.join(", ")}`);
+        console.error(`Run 'brain-dump help' for usage information.`);
+        process.exit(1);
+      }
+    } else {
+      showHelp();
+    }
     break;
 
   // ── Unknown ─────────────────────────────────────────────────
-  default:
-    console.error(`Unknown resource: ${resource}`);
-    console.error(`Available resources: ${RESOURCES.join(", ")}`);
-    console.error(`\nRun 'brain-dump help' for usage information.`);
+  default: {
+    // Combine all known resource names and top-level command names for suggestions
+    const allKnown = [
+      ...RESOURCE_NAMES,
+      "open",
+      "init",
+      "status",
+      "search",
+      "context",
+      "log",
+      "completions",
+      "backup",
+      "restore",
+      "check",
+      "doctor",
+      "export",
+      "import",
+      "help",
+    ];
+    const suggestion = suggestClosest(resource!, allKnown);
+    console.error(`Unknown command: ${resource}`);
+    if (suggestion) {
+      console.error(`\nDid you mean: ${suggestion}?`);
+    }
+    console.error(`\nAvailable resources: ${RESOURCE_NAMES.join(", ")}`);
+    console.error(`Run 'brain-dump help' for usage information.`);
     process.exit(1);
+  }
 }

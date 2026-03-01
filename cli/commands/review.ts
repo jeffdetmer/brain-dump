@@ -11,6 +11,7 @@ import {
   getDemo,
   submitFeedback,
   getFindings,
+  updateDemoStep,
   InvalidActionError,
   ValidationError,
 } from "../../core/index.ts";
@@ -20,6 +21,7 @@ import type {
   FindingStatus,
   MarkFixedStatus,
   DemoStep,
+  DemoStepStatus,
 } from "../../core/index.ts";
 import {
   parseFlags,
@@ -39,17 +41,14 @@ const ACTIONS = [
   "check-complete",
   "generate-demo",
   "get-demo",
+  "update-demo-step",
   "submit-feedback",
   "get-findings",
 ];
 
 export function handle(action: string, args: string[]): void {
   if (!action || action === "--help" || action === "help") {
-    showResourceHelp(
-      "review",
-      ACTIONS,
-      "Flags:\n  --ticket <id>         Ticket ID\n  --finding <id>        Finding ID\n  --severity <s>        critical|major|minor|suggestion\n  --agent <a>           code-reviewer|silent-failure-hunter|code-simplifier\n  --category <c>        Category of finding\n  --description <d>     Detailed description\n  --status <s>          fixed|wont_fix|duplicate\n  --file <path>         File path\n  --line <n>            Line number\n  --fix <text>          Suggested fix\n  --steps-file <path>   JSON file with demo steps\n  --passed              Demo passed\n  --feedback <text>     Demo feedback\n  --pretty              Human-readable output"
-    );
+    showResourceHelp("review");
   }
 
   const flags = parseFlags(args);
@@ -129,6 +128,24 @@ export function handle(action: string, args: string[]): void {
       case "get-demo": {
         const ticketId = requireFlag(flags, "ticket");
         const result = getDemo(db, ticketId);
+        outputResult(result, pretty);
+        break;
+      }
+
+      case "update-demo-step": {
+        const demoScriptId = requireFlag(flags, "demo-script");
+        const stepOrder = numericFlag(flags, "step-order");
+        if (stepOrder === undefined) {
+          throw new ValidationError("Missing required flag: --step-order <n>");
+        }
+        const stepStatus = requireEnumFlag<DemoStepStatus>(flags, "step-status", [
+          "pending",
+          "passed",
+          "failed",
+          "skipped",
+        ]);
+        const stepNotes = optionalFlag(flags, "step-notes");
+        const result = updateDemoStep(db, demoScriptId, stepOrder, stepStatus, stepNotes);
         outputResult(result, pretty);
         break;
       }
