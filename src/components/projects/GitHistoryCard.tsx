@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useGitProjectInfo } from "../../lib/hooks";
 import {
   cardStyles,
@@ -13,19 +13,56 @@ interface GitHistoryCardProps {
   projectPath: string;
 }
 
+function CommitLink({
+  url,
+  children,
+  title,
+}: {
+  url: string | null;
+  children: React.ReactNode;
+  title?: string;
+}) {
+  if (url) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="hover:underline hover:text-[var(--accent-primary)]"
+        title={title}
+      >
+        {children}
+      </a>
+    );
+  }
+  return <>{children}</>;
+}
+
 export default function GitHistoryCard({ projectPath }: GitHistoryCardProps) {
   const { data, isLoading, error } = useGitProjectInfo(projectPath);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
+  const timeoutRef = useRef<number | null>(null);
 
-  const handleCopyHash = useCallback(async (hash: string) => {
-    try {
-      await navigator.clipboard.writeText(hash);
-      setCopiedHash(hash);
-      setTimeout(() => setCopiedHash(null), 2000);
-    } catch {
-      // Clipboard API unavailable (e.g. insecure context) - no action needed
-    }
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
   }, []);
+
+  function handleCopyHash(hash: string) {
+    navigator.clipboard
+      .writeText(hash)
+      .then(() => {
+        setCopiedHash(hash);
+        timeoutRef.current = window.setTimeout(() => setCopiedHash(null), 2000);
+      })
+      .catch(() => {
+        setCopiedHash(hash);
+        timeoutRef.current = window.setTimeout(() => setCopiedHash(null), 2000);
+      });
+  }
 
   return (
     <div style={cardStyles}>
@@ -54,7 +91,13 @@ export default function GitHistoryCard({ projectPath }: GitHistoryCardProps) {
                 {data.lastCommit.message}
               </p>
               <p style={commitMetaStyles}>
-                {data.lastCommit.date} by {data.lastCommit.author}
+                <CommitLink
+                  url={data.remoteUrl ? `${data.remoteUrl}/commit/${data.lastCommit.hash}` : null}
+                  title="View on GitHub"
+                >
+                  {data.lastCommit.date}
+                </CommitLink>{" "}
+                by {data.lastCommit.author}
               </p>
             </div>
           ) : (
@@ -66,21 +109,33 @@ export default function GitHistoryCard({ projectPath }: GitHistoryCardProps) {
               <p style={recentTitleStyles}>Recent Commits:</p>
               <div style={commitListStyles}>
                 {data.recentCommits.map((commit) => (
-                  <button
-                    key={commit.hash}
-                    style={commitItemStyles}
-                    onClick={() => handleCopyHash(commit.hash)}
-                    title="Click to copy commit hash"
-                    type="button"
-                    className="hover:bg-[var(--bg-hover)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]"
-                  >
-                    <span style={copiedHash === commit.hash ? copiedHashStyles : commitHashStyles}>
-                      {copiedHash === commit.hash ? "Copied!" : commit.hash.substring(0, 7)}
-                    </span>
+                  <div key={commit.hash} style={commitItemStyles} className="group relative">
+                    <CommitLink
+                      url={data.remoteUrl ? `${data.remoteUrl}/commit/${commit.hash}` : null}
+                      title="View on GitHub"
+                    >
+                      <span style={commitHashStyles}>{commit.hash.substring(0, 7)}</span>
+                    </CommitLink>
+
                     <span style={commitShortMessageStyles} title={commit.message}>
                       {commit.message}
                     </span>
-                  </button>
+
+                    <button
+                      onClick={() => handleCopyHash(commit.hash)}
+                      title="Copy commit hash"
+                      type="button"
+                      className="opacity-0 group-hover:opacity-100 p-1 hover:bg-[var(--bg-hover)] rounded focus:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] transition-opacity"
+                    >
+                      {copiedHash === commit.hash ? (
+                        <span style={{ color: "var(--accent-primary)", fontSize: "10px" }}>
+                          Copied!
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: "12px" }}>📋</span>
+                      )}
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -159,22 +214,13 @@ const commitItemStyles: React.CSSProperties = {
   borderRadius: "var(--radius-sm)",
   fontSize: "var(--font-size-xs)",
   color: "var(--text-secondary)",
-  cursor: "pointer",
   transition: "all var(--transition-fast)",
-  textAlign: "left",
 };
 
 const commitHashStyles: React.CSSProperties = {
   fontFamily: "monospace",
   color: "var(--text-tertiary)",
   flexShrink: 0,
-};
-
-const copiedHashStyles: React.CSSProperties = {
-  fontFamily: "monospace",
-  color: "var(--accent-primary)",
-  flexShrink: 0,
-  fontWeight: "var(--font-weight-medium)" as React.CSSProperties["fontWeight"],
 };
 
 const commitShortMessageStyles: React.CSSProperties = {

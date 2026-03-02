@@ -20,6 +20,7 @@ export interface GitProjectInfo {
   recentCommits: Commit[];
   branch: string | null;
   hasUncommittedChanges: boolean;
+  remoteUrl: string | null;
 }
 
 // Helper: Parse git log line
@@ -36,6 +37,10 @@ function parseCommitLine(line: string): Commit | null {
 }
 
 // Helper: Format git date to human-readable
+function pluralize(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+}
+
 function formatDate(dateStr: string): string {
   try {
     const date = new Date(dateStr);
@@ -48,9 +53,9 @@ function formatDate(dateStr: string): string {
     const diffDays = Math.floor(diffMs / 86400000);
 
     if (diffMins < 1) return "just now";
-    if (diffMins < 60) return `${diffMins} minute${diffMins > 1 ? "s" : ""} ago`;
-    if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`;
-    if (diffDays < 7) return `${diffDays} day${diffDays > 1 ? "s" : ""} ago`;
+    if (diffMins < 60) return `${pluralize(diffMins, "minute")} ago`;
+    if (diffHours < 24) return `${pluralize(diffHours, "hour")} ago`;
+    if (diffDays < 7) return `${pluralize(diffDays, "day")} ago`;
 
     return date.toLocaleDateString();
   } catch {
@@ -72,6 +77,7 @@ export const getGitProjectInfo = createServerFn({ method: "GET" })
       recentCommits: [],
       branch: null,
       hasUncommittedChanges: false,
+      remoteUrl: null,
     };
 
     try {
@@ -86,6 +92,16 @@ export const getGitProjectInfo = createServerFn({ method: "GET" })
       const branchResult = runGitCommand("git rev-parse --abbrev-ref HEAD", projectPath);
       if (branchResult.success) {
         result.branch = branchResult.output;
+      }
+
+      // Get remote URL
+      const remoteResult = runGitCommand("git remote get-url origin", projectPath);
+      if (remoteResult.success && remoteResult.output) {
+        const remote = remoteResult.output.trim();
+        const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/);
+        if (match) {
+          result.remoteUrl = `https://github.com/${match[1]}`;
+        }
       }
 
       // Get last commit
@@ -123,8 +139,14 @@ export const getGitProjectInfo = createServerFn({ method: "GET" })
       }
     } catch (err: unknown) {
       const message = toErrorMessage(err);
+      if (message.includes("Not a git repository")) {
+        logger.error("getGitProjectInfo error - not a git repository", new Error(message));
+        throw new Error(
+          "Not a git repository. Initialize with 'git init' or select a valid project path."
+        );
+      }
       logger.error("getGitProjectInfo error", new Error(message));
-      throw new Error(`Failed to get git project info: ${message}`);
+      throw new Error(`Unable to read git history: ${message}`);
     }
 
     return result;
