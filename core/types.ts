@@ -185,6 +185,41 @@ export interface CompleteEpicResult {
 }
 
 // ============================================
+// Epic Review Run Types
+// ============================================
+
+export type EpicReviewRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+export type EpicReviewRunTicketStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+export interface EpicReviewRun {
+  id: string;
+  epicId: string;
+  selectedTicketIds: string[];
+  steeringPrompt: string | null;
+  launchMode: string;
+  provider: string | null;
+  status: EpicReviewRunStatus;
+  summary: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EpicReviewRunTicket {
+  id: string;
+  epicReviewRunId: string;
+  ticketId: string;
+  position: number;
+  status: EpicReviewRunTicketStatus;
+  summary: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+// ============================================
 // Review & Demo Types
 // ============================================
 
@@ -203,6 +238,7 @@ export interface ReviewFinding {
   filePath?: string;
   lineNumber?: number;
   suggestedFix?: string;
+  epicReviewRunId?: string | null;
   status: FindingStatus;
   createdAt: string;
 }
@@ -234,6 +270,7 @@ export interface DemoScript {
   id: string;
   ticketId: string;
   steps: DemoStep[];
+  epicReviewRunId?: string | null;
   generatedAt: string;
   executedAt?: string | null;
   feedback?: string | null;

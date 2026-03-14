@@ -14,12 +14,93 @@ import {
   type EnhancedPRDItem,
   type EnhancedPRDDocument,
 } from "../lib/prd-extraction";
-import { startWork, createRealGitOperations, GitError } from "../../core/index.ts";
+import {
+  startWork,
+  createRealGitOperations,
+  GitError,
+  createEpicReviewRun,
+  addEpicReviewRunAuditComments,
+  updateEpicReviewRun,
+  updateEpicReviewRunTicketLink,
+} from "../../core/index.ts";
 
 const coreGit = createRealGitOperations();
 
 // Import Docker utilities for socket-aware Docker commands
 import { execDockerCommand, getDockerHostEnvValue } from "./docker-utils";
+
+type TicketRecord = typeof tickets.$inferSelect;
+type RalphWorkingMethod =
+  | "auto"
+  | "claude-code"
+  | "vscode"
+  | "opencode"
+  | "cursor"
+  | "copilot-cli"
+  | "codex";
+type RalphAiBackend = "claude" | "opencode" | "codex";
+
+export interface RalphImplementationLaunchProfile {
+  type?: "implementation";
+}
+
+export interface RalphReviewLaunchProfile {
+  type: "review";
+  selectedTicketIds: string[];
+  steeringPrompt?: string | null;
+}
+
+export type RalphEpicLaunchProfile = RalphImplementationLaunchProfile | RalphReviewLaunchProfile;
+
+interface RalphReviewPromptTarget {
+  id: string;
+  title: string;
+}
+
+interface RalphImplementationPromptProfile {
+  type: "implementation";
+}
+
+interface RalphReviewPromptProfile {
+  type: "review";
+  selectedTicket: RalphReviewPromptTarget;
+  steeringPrompt?: string | null;
+  prdRelativePath?: string | null;
+}
+
+type RalphPromptProfile = RalphImplementationPromptProfile | RalphReviewPromptProfile;
+
+interface PreparedReviewLaunch {
+  ticket: TicketRecord;
+  promptProfile: RalphReviewPromptProfile;
+  prdRelativePath: string;
+  contextRelativePath: string;
+}
+
+interface EpicLaunchPreparation {
+  promptProfile: RalphPromptProfile;
+  prdTickets: TicketRecord[];
+  startsImplementationWorkflow: boolean;
+  reviewLaunches: PreparedReviewLaunch[];
+}
+
+function sanitizeArtifactSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]+/g, "-");
+}
+
+function buildReviewLaunchArtifactPaths(
+  epicReviewRunId: string,
+  ticketId: string
+): {
+  prdRelativePath: string;
+  contextRelativePath: string;
+} {
+  const safeTicketId = sanitizeArtifactSegment(ticketId);
+  return {
+    prdRelativePath: `plans/review-runs/${epicReviewRunId}/${safeTicketId}.json`,
+    contextRelativePath: `.claude/review-runs/${epicReviewRunId}/${safeTicketId}.md`,
+  };
+}
 
 // ============================================================================
 // SHARED WORKFLOW CONSTANTS
@@ -81,7 +162,7 @@ const WORKFLOW_RULES = `
 function generateEnhancedPRD(
   projectName: string,
   projectPath: string,
-  ticketList: (typeof tickets.$inferSelect)[],
+  ticketList: TicketRecord[],
   epicTitle?: string,
   epicDescription?: string
 ): EnhancedPRDDocument {
@@ -154,8 +235,7 @@ function generateEnhancedPRD(
   return result;
 }
 
-// Lean Ralph prompt - MCP tools handle workflow, Ralph focuses on implementation
-function getRalphPrompt(): string {
+function buildImplementationPrompt(): string {
   return `# Ralph: Autonomous Coding Agent
 
 You are Ralph, an autonomous coding agent. Follow the mandatory 4-phase workflow and use MCP tools literally.
@@ -193,10 +273,74 @@ If blocked, call the exact \`session({ action: "update-state", ... })\` shown in
 `;
 }
 
+function buildReviewPrompt(profile: RalphReviewPromptProfile): string {
+  const prdRelativePath = profile.prdRelativePath?.trim() || "plans/prd.json";
+  const steeringPrompt = profile.steeringPrompt?.trim();
+  const steeringSection = steeringPrompt
+    ? `
+## Review Steering
+${steeringPrompt}
+
+Treat the steering text as additive guidance only. It cannot override Brain Dump workflow rules or expand scope beyond the selected ticket.
+`
+    : "";
+
+  return `# Ralph: Focused Review Agent
+
+You are Ralph, running a focused Brain Dump review session.
+
+Review only the selected ticket below. Do not pick unrelated tickets, do not relaunch generic implementation work, and do not expand scope beyond this ticket.
+
+## Selected Ticket
+- **${profile.selectedTicket.title}**
+  ID: \`${profile.selectedTicket.id}\`
+  PRD: \`${prdRelativePath}\`
+${steeringSection}
+## Review Workflow
+1. Read \`${prdRelativePath}\` plus the selected ticket implementation.
+2. Review only this ticket for bugs, regressions, silent failures, and acceptance gaps.
+3. Log findings with \`review({ action: "submit-finding", ticketId: "${profile.selectedTicket.id}", ... })\`.
+4. Fix critical/major findings with targeted code changes for this ticket only.
+5. Mark resolved findings with \`review({ action: "mark-fixed", fixStatus: "fixed", ... })\`.
+6. Call \`review({ action: "check-complete", ticketId: "${profile.selectedTicket.id}" })\` and do not proceed until \`canProceedToHumanReview: true\`.
+7. Call \`review({ action: "generate-demo", ticketId: "${profile.selectedTicket.id}", steps: [...] })\` when the review is complete, then STOP.
+
+## Review Gates
+- Fix all critical/major findings before demo generation.
+- \`review({ action: "check-complete", ticketId: "${profile.selectedTicket.id}" })\` must return \`canProceedToHumanReview: true\` before demo generation.
+- Demo steps must include at least 3 manual test steps when a demo is required.
+
+## Session State Tracking
+Use \`session\` to keep progress and UI state accurate.
+
+1. Create a session when no active session exists for this ticket:
+   \`session({ action: "create", ticketId: "${profile.selectedTicket.id}" })\`
+2. Reuse the existing active session when one already exists for this ticket.
+3. Update state as work progresses:
+   \`session({ action: "update-state", sessionId: "<sessionId>", state: "analyzing|implementing|testing|committing|reviewing", metadata: { message: "..." } })\`
+4. Complete after demo generation, then STOP:
+   \`session({ action: "complete", sessionId: "<sessionId>", outcome: "success" })\`
+
+## Hard Guards
+- Do NOT pick unrelated tickets or backlog work.
+- Do NOT skip \`review({ action: "check-complete" })\` before \`review({ action: "generate-demo" })\`.
+- Do NOT call \`review({ action: "submit-feedback" })\` yourself or move tickets to \`done\`.
+- Do NOT continue to another ticket after the selected review is complete.
+
+## Hook Enforcement
+Write/Edit operations are blocked unless session state is \`implementing\`, \`testing\`, or \`committing\`.
+If blocked, call the exact \`session({ action: "update-state", ... })\` shown in the hook message, then retry.
+`;
+}
+
+export function getRalphPrompt(profile: RalphPromptProfile = { type: "implementation" }): string {
+  return profile.type === "review" ? buildReviewPrompt(profile) : buildImplementationPrompt();
+}
+
 // Generate VS Code context file for Ralph mode
 // This creates a markdown file that Claude in VS Code can read
 // Accepts either legacy PRDDocument or EnhancedPRDDocument
-function generateVSCodeContext(prd: EnhancedPRDDocument): string {
+function buildImplementationContext(prd: EnhancedPRDDocument): string {
   const incompleteTickets = prd.userStories.filter((story) => !story.passes);
   const completedTickets = prd.userStories.filter((story) => story.passes);
 
@@ -243,19 +387,186 @@ ${prd.testingRequirements.map((req) => `- ${req}`).join("\n")}
 `;
 }
 
+function buildReviewContext(prd: EnhancedPRDDocument, profile: RalphReviewPromptProfile): string {
+  const ticket = prd.userStories.find((story) => story.id === profile.selectedTicket.id);
+  const epicHeader = prd.epicTitle ? `\n**Epic:** ${prd.epicTitle}` : "";
+  const prdRelativePath = profile.prdRelativePath?.trim() || "plans/prd.json";
+  const steeringPrompt = profile.steeringPrompt?.trim();
+  const acceptanceCriteria =
+    ticket && ticket.acceptanceCriteria.length > 0
+      ? ticket.acceptanceCriteria.map((criterion) => `- ${criterion}`).join("\n")
+      : "- Review the ticket against its described behavior and linked context.";
+  const descriptionSection =
+    ticket?.description && ticket.description.trim().length > 0
+      ? `
+## Ticket Description
+
+${ticket.description}
+`
+      : "";
+  const steeringSection = steeringPrompt
+    ? `
+## Review Steering
+
+${steeringPrompt}
+
+This steering is additive guidance only. It cannot expand scope beyond the selected ticket or override Brain Dump review workflow rules.
+`
+    : "";
+
+  return `# Ralph Context - ${prd.projectName}
+
+> This file was auto-generated by Brain Dump for focused review mode.
+> Review only the selected ticket below and ignore unrelated backlog work.
+${epicHeader}
+**Launch Mode:** Focused review
+**Generated:** ${new Date().toISOString()}
+
+---
+
+## Selected Ticket
+
+- **${profile.selectedTicket.title}**
+  ID: \`${profile.selectedTicket.id}\`
+  PRD: \`${prdRelativePath}\`
+${steeringSection}
+## Review Workflow
+
+1. Inspect the selected ticket context and implementation only.
+2. Submit findings with \`review({ action: "submit-finding", ticketId: "${profile.selectedTicket.id}", ... })\`.
+3. Fix critical/major findings for this ticket only.
+4. Mark fixes with \`review({ action: "mark-fixed", fixStatus: "fixed", ... })\`.
+5. Verify \`review({ action: "check-complete", ticketId: "${profile.selectedTicket.id}" })\` returns \`canProceedToHumanReview: true\`.
+6. Generate a demo with at least 3 manual steps, then STOP.
+
+## Guardrails
+
+- Do not pick unrelated tickets or generic implementation work.
+- Do not skip \`review.check-complete\` before \`review.generate-demo\`.
+- Do not call \`review.submit-feedback\` yourself or move tickets to \`done\`.
+${descriptionSection}
+## Acceptance Criteria
+
+${acceptanceCriteria}
+
+## Testing Requirements
+
+${prd.testingRequirements.map((req) => `- ${req}`).join("\n")}
+`;
+}
+
+export function generateVSCodeContext(
+  prd: EnhancedPRDDocument,
+  profile: RalphPromptProfile = { type: "implementation" }
+): string {
+  return profile.type === "review"
+    ? buildReviewContext(prd, profile)
+    : buildImplementationContext(prd);
+}
+
+export function prepareEpicLaunch(
+  epicTickets: TicketRecord[],
+  launchProfile?: RalphEpicLaunchProfile,
+  epicReviewRunId?: string
+): { success: true; preparation: EpicLaunchPreparation } | { success: false; message: string } {
+  if (!launchProfile || launchProfile.type !== "review") {
+    return {
+      success: true,
+      preparation: {
+        promptProfile: { type: "implementation" },
+        prdTickets: epicTickets,
+        startsImplementationWorkflow: true,
+        reviewLaunches: [],
+      },
+    };
+  }
+
+  if (launchProfile.selectedTicketIds.length === 0) {
+    return {
+      success: false,
+      message: "Focused review launch requires at least one selected ticket.",
+    };
+  }
+
+  const seenTicketIds = new Set<string>();
+  const selectedTickets: TicketRecord[] = [];
+
+  for (const selectedTicketId of launchProfile.selectedTicketIds) {
+    if (seenTicketIds.has(selectedTicketId)) {
+      return {
+        success: false,
+        message: `Focused review launch received duplicate ticket selection: ${selectedTicketId}`,
+      };
+    }
+
+    seenTicketIds.add(selectedTicketId);
+
+    const selectedTicket = epicTickets.find((ticket) => ticket.id === selectedTicketId);
+    if (!selectedTicket) {
+      return {
+        success: false,
+        message: `Selected review ticket does not belong to this epic: ${selectedTicketId}`,
+      };
+    }
+
+    selectedTickets.push(selectedTicket);
+  }
+
+  const reviewLaunches = selectedTickets.map((selectedTicket) => {
+    const artifactPaths = buildReviewLaunchArtifactPaths(
+      epicReviewRunId ?? "focused-review-run",
+      selectedTicket.id
+    );
+
+    return {
+      ticket: selectedTicket,
+      prdRelativePath: artifactPaths.prdRelativePath,
+      contextRelativePath: artifactPaths.contextRelativePath,
+      promptProfile: {
+        type: "review" as const,
+        selectedTicket: {
+          id: selectedTicket.id,
+          title: selectedTicket.title,
+        },
+        steeringPrompt: launchProfile.steeringPrompt ?? null,
+        prdRelativePath: artifactPaths.prdRelativePath,
+      },
+    };
+  });
+
+  const firstLaunch = reviewLaunches[0];
+  if (!firstLaunch) {
+    return {
+      success: false,
+      message: "Focused review launch requires at least one selected ticket.",
+    };
+  }
+
+  return {
+    success: true,
+    preparation: {
+      promptProfile: firstLaunch.promptProfile,
+      prdTickets: selectedTickets,
+      startsImplementationWorkflow: false,
+      reviewLaunches,
+    },
+  };
+}
+
 // Write VS Code context file to project
 async function writeVSCodeContext(
   projectPath: string,
-  content: string
+  content: string,
+  relativePath: string = ".claude/ralph-context.md"
 ): Promise<{ success: true; path: string } | { success: false; message: string }> {
   const { writeFileSync, mkdirSync } = await import("fs");
-  const { join } = await import("path");
+  const { join, dirname } = await import("path");
 
-  const claudeDir = join(projectPath, ".claude");
-  const contextPath = join(claudeDir, "ralph-context.md");
+  const contextPath = join(projectPath, relativePath);
+  const parentDir = dirname(contextPath);
 
   try {
-    mkdirSync(claudeDir, { recursive: true });
+    mkdirSync(parentDir, { recursive: true });
     writeFileSync(contextPath, content, "utf-8");
     return { success: true, path: contextPath };
   } catch (error) {
@@ -263,7 +574,7 @@ async function writeVSCodeContext(
     console.error(`[brain-dump] Failed to write VS Code context file to ${contextPath}:`, error);
     return {
       success: false,
-      message: `Failed to create Ralph context file in ${claudeDir}: ${message}. Check write permissions and disk space.`,
+      message: `Failed to create Ralph context file in ${parentDir}: ${message}. Check write permissions and disk space.`,
     };
   }
 }
@@ -301,7 +612,8 @@ export function generateRalphScript(
   timeoutSeconds: number = DEFAULT_TIMEOUT_SECONDS,
   dockerHostEnv: string | null = null,
   projectOrigin?: ProjectOriginInfo | undefined,
-  aiBackend: "claude" | "opencode" | "codex" = "claude"
+  aiBackend: RalphAiBackend = "claude",
+  promptProfile: RalphPromptProfile = { type: "implementation" }
 ): string {
   const imageName = "brain-dump-ralph-sandbox:latest";
   const sandboxHeader = useSandbox ? " (Docker Sandbox)" : "";
@@ -727,7 +1039,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   # Create prompt file for this iteration
   ${promptFileSetup}
   cat > "$PROMPT_FILE" << 'RALPH_PROMPT_EOF'
-${getRalphPrompt()}
+${getRalphPrompt(promptProfile)}
 RALPH_PROMPT_EOF
 
   # Validate prompt file is non-empty before passing to Claude
@@ -1326,15 +1638,8 @@ export const launchRalphForTicket = createServerFn({ method: "POST" })
       maxIterations?: number;
       preferredTerminal?: string | null;
       useSandbox?: boolean;
-      aiBackend?: "claude" | "opencode" | "codex";
-      workingMethodOverride?:
-        | "auto"
-        | "claude-code"
-        | "vscode"
-        | "opencode"
-        | "cursor"
-        | "copilot-cli"
-        | "codex";
+      aiBackend?: RalphAiBackend;
+      workingMethodOverride?: RalphWorkingMethod;
     }) => data
   )
   .handler(async ({ data }) => {
@@ -1441,16 +1746,7 @@ export const launchRalphForTicket = createServerFn({ method: "POST" })
 
     // Branch based on workingMethod setting
     const workingMethod =
-      workingMethodOverride ||
-      (project.workingMethod as
-        | "auto"
-        | "claude-code"
-        | "vscode"
-        | "opencode"
-        | "cursor"
-        | "copilot-cli"
-        | "codex") ||
-      "auto";
+      workingMethodOverride || (project.workingMethod as RalphWorkingMethod) || "auto";
     console.log(
       `[brain-dump] Ralph ticket launch: workingMethod="${workingMethod}" for project "${project.name}", timeout=${timeoutSeconds}s`
     );
@@ -1540,15 +1836,9 @@ export const launchRalphForEpic = createServerFn({ method: "POST" })
       maxIterations?: number;
       preferredTerminal?: string | null;
       useSandbox?: boolean;
-      aiBackend?: "claude" | "opencode" | "codex";
-      workingMethodOverride?:
-        | "auto"
-        | "claude-code"
-        | "vscode"
-        | "opencode"
-        | "cursor"
-        | "copilot-cli"
-        | "codex";
+      aiBackend?: RalphAiBackend;
+      workingMethodOverride?: RalphWorkingMethod;
+      launchProfile?: RalphEpicLaunchProfile;
     }) => data
   )
   .handler(async ({ data }) => {
@@ -1559,9 +1849,10 @@ export const launchRalphForEpic = createServerFn({ method: "POST" })
       useSandbox = false,
       aiBackend = "claude",
       workingMethodOverride,
+      launchProfile,
     } = data;
     const { writeFileSync, mkdirSync, existsSync, chmodSync } = await import("fs");
-    const { join } = await import("path");
+    const { join, dirname } = await import("path");
     const { homedir } = await import("os");
     const { randomUUID } = await import("crypto");
     const { settings } = await import("../lib/schema");
@@ -1624,15 +1915,267 @@ export const launchRalphForEpic = createServerFn({ method: "POST" })
       return { success: false, message: "No pending tickets in this epic" };
     }
 
+    let epicReviewRunId: string | null = null;
+    if (launchProfile?.type === "review") {
+      try {
+        const run = createEpicReviewRun(sqlite, {
+          epicId: epic.id,
+          selectedTicketIds: launchProfile.selectedTicketIds,
+          launchMode: "focused-review",
+          provider: aiBackend,
+          steeringPrompt: launchProfile.steeringPrompt ?? null,
+        });
+        addEpicReviewRunAuditComments(sqlite, run.id);
+        epicReviewRunId = run.id;
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : "Failed to create focused review run",
+        };
+      }
+    }
+
+    const launchPreparation = prepareEpicLaunch(
+      epicTickets,
+      launchProfile,
+      epicReviewRunId ?? undefined
+    );
+    if (!launchPreparation.success) {
+      if (epicReviewRunId) {
+        updateEpicReviewRun(sqlite, {
+          epicReviewRunId,
+          status: "failed",
+          summary: launchPreparation.message,
+          completedAt: new Date().toISOString(),
+        });
+      }
+      return launchPreparation;
+    }
+
+    const { promptProfile, prdTickets, startsImplementationWorkflow, reviewLaunches } =
+      launchPreparation.preparation;
+    const launchedTicketCount = prdTickets.length;
+    const workingMethod =
+      workingMethodOverride || (project.workingMethod as RalphWorkingMethod) || "auto";
+
+    if (reviewLaunches.length > 0 && epicReviewRunId) {
+      const runStartedAt = new Date().toISOString();
+      updateEpicReviewRun(sqlite, {
+        epicReviewRunId,
+        status: "running",
+        startedAt: runStartedAt,
+        summary: `Launching focused review for ${reviewLaunches.length} ticket${reviewLaunches.length === 1 ? "" : "s"}.`,
+      });
+
+      const scriptDir = join(homedir(), ".brain-dump", "scripts");
+      mkdirSync(scriptDir, { recursive: true });
+
+      let firstContextPath: string | undefined;
+      let firstTerminalUsed: string | undefined;
+      let successfulLaunchCount = 0;
+      const failureMessages: string[] = [];
+
+      for (const reviewLaunch of reviewLaunches) {
+        const ticketPrd = generateEnhancedPRD(
+          project.name,
+          project.path,
+          [reviewLaunch.ticket],
+          epic.title,
+          epic.description ?? undefined
+        );
+        const ticketPrdPath = join(project.path, reviewLaunch.prdRelativePath);
+        mkdirSync(dirname(ticketPrdPath), { recursive: true });
+        writeFileSync(ticketPrdPath, JSON.stringify(ticketPrd, null, 2));
+
+        const launchedAt = new Date().toISOString();
+
+        if (
+          workingMethod === "vscode" ||
+          workingMethod === "cursor" ||
+          workingMethod === "copilot-cli"
+        ) {
+          const contextContent = generateVSCodeContext(ticketPrd, reviewLaunch.promptProfile);
+          const contextResult = await writeVSCodeContext(
+            project.path,
+            contextContent,
+            reviewLaunch.contextRelativePath
+          );
+
+          if (!contextResult.success) {
+            failureMessages.push(`${reviewLaunch.ticket.title}: ${contextResult.message}`);
+            updateEpicReviewRunTicketLink(sqlite, {
+              epicReviewRunId,
+              ticketId: reviewLaunch.ticket.id,
+              status: "failed",
+              summary: contextResult.message,
+              completedAt: launchedAt,
+            });
+            continue;
+          }
+
+          if (!firstContextPath) {
+            firstContextPath = contextResult.path;
+          }
+
+          const launchResult =
+            workingMethod === "vscode"
+              ? await launchInVSCode(project.path, contextResult.path)
+              : workingMethod === "cursor"
+                ? await launchInCursor(project.path, contextResult.path)
+                : await launchInCopilotCli(project.path, contextResult.path, preferredTerminal);
+
+          if (!launchResult.success) {
+            failureMessages.push(`${reviewLaunch.ticket.title}: ${launchResult.message}`);
+            updateEpicReviewRunTicketLink(sqlite, {
+              epicReviewRunId,
+              ticketId: reviewLaunch.ticket.id,
+              status: "failed",
+              summary: launchResult.message,
+              completedAt: launchedAt,
+            });
+            continue;
+          }
+
+          successfulLaunchCount += 1;
+          updateEpicReviewRunTicketLink(sqlite, {
+            epicReviewRunId,
+            ticketId: reviewLaunch.ticket.id,
+            status: "running",
+            summary:
+              workingMethod === "copilot-cli"
+                ? `Focused review opened in ${"terminal" in launchResult ? launchResult.terminal : "your terminal"}.`
+                : `Focused review context opened in ${workingMethod === "vscode" ? "VS Code" : "Cursor"}.`,
+            startedAt: launchedAt,
+          });
+
+          if (workingMethod === "copilot-cli" && "terminal" in launchResult && !firstTerminalUsed) {
+            firstTerminalUsed = String(launchResult.terminal);
+          }
+
+          continue;
+        }
+
+        const reviewScript = generateRalphScript(
+          project.path,
+          effectiveMaxIterations,
+          useSandbox,
+          DEFAULT_RESOURCE_LIMITS,
+          timeoutSeconds,
+          dockerHostEnv,
+          useSandbox
+            ? {
+                projectId: project.id,
+                projectName: project.name,
+                epicId: epic.id,
+                epicTitle: epic.title,
+              }
+            : undefined,
+          aiBackend,
+          reviewLaunch.promptProfile
+        );
+        const reviewScriptPath = join(
+          scriptDir,
+          `ralph-epic-review-${useSandbox ? "docker-" : ""}${sanitizeArtifactSegment(reviewLaunch.ticket.id)}-${randomUUID()}.sh`
+        );
+        writeFileSync(reviewScriptPath, reviewScript, { mode: 0o700 });
+        chmodSync(reviewScriptPath, 0o700);
+
+        const launchResult = await launchInTerminal(
+          project.path,
+          reviewScriptPath,
+          preferredTerminal
+        );
+        if (!launchResult.success) {
+          failureMessages.push(`${reviewLaunch.ticket.title}: ${launchResult.message}`);
+          updateEpicReviewRunTicketLink(sqlite, {
+            epicReviewRunId,
+            ticketId: reviewLaunch.ticket.id,
+            status: "failed",
+            summary: launchResult.message,
+            completedAt: launchedAt,
+          });
+          continue;
+        }
+
+        successfulLaunchCount += 1;
+        if (!firstTerminalUsed) {
+          firstTerminalUsed = launchResult.terminal;
+        }
+        updateEpicReviewRunTicketLink(sqlite, {
+          epicReviewRunId,
+          ticketId: reviewLaunch.ticket.id,
+          status: "running",
+          summary: `Focused review launched in ${launchResult.terminal}.`,
+          startedAt: launchedAt,
+        });
+      }
+
+      const failedLaunchCount = reviewLaunches.length - successfulLaunchCount;
+      const runSummary =
+        failedLaunchCount === 0
+          ? `Launched focused review for ${successfulLaunchCount} ticket${successfulLaunchCount === 1 ? "" : "s"}.`
+          : `Launched focused review for ${successfulLaunchCount} of ${reviewLaunches.length} ticket${reviewLaunches.length === 1 ? "" : "s"}. Failed launches: ${failureMessages.join(" | ")}`;
+
+      updateEpicReviewRun(sqlite, {
+        epicReviewRunId,
+        status: successfulLaunchCount === 0 ? "failed" : "running",
+        summary: runSummary,
+        completedAt: successfulLaunchCount === 0 ? new Date().toISOString() : null,
+      });
+
+      if (successfulLaunchCount === 0) {
+        return {
+          success: false,
+          message: runSummary,
+          warnings: sshWarnings,
+        };
+      }
+
+      if (workingMethod === "copilot-cli") {
+        const terminalLabel = firstTerminalUsed ?? "your terminal";
+        return {
+          success: true,
+          message: `Opening Copilot CLI in ${terminalLabel} for ${successfulLaunchCount} focused review ticket${successfulLaunchCount === 1 ? "" : "s"}. Review run: ${epicReviewRunId}.${failedLaunchCount > 0 ? ` ${failedLaunchCount} launch${failedLaunchCount === 1 ? "" : "es"} failed.` : ""}`,
+          launchMethod: "copilot-cli" as const,
+          contextFile: firstContextPath,
+          ...(firstTerminalUsed ? { terminalUsed: firstTerminalUsed } : {}),
+          ticketCount: successfulLaunchCount,
+          warnings: sshWarnings,
+        };
+      }
+
+      if (workingMethod === "vscode" || workingMethod === "cursor") {
+        const methodLabel = workingMethod === "vscode" ? "VS Code" : "Cursor";
+        return {
+          success: true,
+          message: `Opened ${methodLabel} with isolated focused review contexts for ${successfulLaunchCount} ticket${successfulLaunchCount === 1 ? "" : "s"}. Review run: ${epicReviewRunId}.${failedLaunchCount > 0 ? ` ${failedLaunchCount} launch${failedLaunchCount === 1 ? "" : "es"} failed.` : ""}`,
+          launchMethod: workingMethod,
+          contextFile: firstContextPath,
+          ticketCount: successfulLaunchCount,
+          warnings: sshWarnings,
+        };
+      }
+
+      return {
+        success: true,
+        message: `Launched Ralph for ${successfulLaunchCount} focused review ticket${successfulLaunchCount === 1 ? "" : "s"} in ${firstTerminalUsed ?? "your terminal"}. Review run: ${epicReviewRunId}.${failedLaunchCount > 0 ? ` ${failedLaunchCount} launch${failedLaunchCount === 1 ? "" : "es"} failed.` : ""}`,
+        terminalUsed: firstTerminalUsed,
+        launchMethod: "terminal" as const,
+        ticketCount: successfulLaunchCount,
+        warnings: sshWarnings,
+      };
+    }
+
     // Create plans directory in project
     const plansDir = join(project.path, "plans");
     mkdirSync(plansDir, { recursive: true });
 
-    // Generate enhanced PRD with Loom-style structure for all epic tickets
+    // Generate a launch-specific PRD: all epic tickets for implementation, or the focused
+    // review ticket when using review mode.
     const prd = generateEnhancedPRD(
       project.name,
       project.path,
-      epicTickets,
+      prdTickets,
       epic.title,
       epic.description ?? undefined
     );
@@ -1655,7 +2198,8 @@ export const launchRalphForEpic = createServerFn({ method: "POST" })
             epicTitle: epic.title,
           }
         : undefined,
-      aiBackend
+      aiBackend,
+      promptProfile
     );
     const scriptDir = join(homedir(), ".brain-dump", "scripts");
     mkdirSync(scriptDir, { recursive: true });
@@ -1670,46 +2214,38 @@ export const launchRalphForEpic = createServerFn({ method: "POST" })
     // For epic launches, Ralph handles individual tickets via MCP workflow({ action: "start-work" }) during iteration.
     // Here we start the workflow for the first backlog/ready ticket to create the epic branch,
     // and mark others as in_progress for the PRD.
-    const firstTicket = epicTickets.find(
-      (t: (typeof epicTickets)[0]) => t.status === "backlog" || t.status === "ready"
-    );
-    if (firstTicket) {
-      try {
-        startWork(sqlite, firstTicket.id, coreGit);
-      } catch (err) {
-        if (err instanceof GitError) {
-          console.warn(
-            `[brain-dump] Git not available for first ticket, skipping branch creation: ${err.message}`
-          );
-        } else {
-          throw err;
+    if (startsImplementationWorkflow) {
+      const firstTicket = epicTickets.find(
+        (t: (typeof epicTickets)[0]) => t.status === "backlog" || t.status === "ready"
+      );
+      if (firstTicket) {
+        try {
+          startWork(sqlite, firstTicket.id, coreGit);
+        } catch (err) {
+          if (err instanceof GitError) {
+            console.warn(
+              `[brain-dump] Git not available for first ticket, skipping branch creation: ${err.message}`
+            );
+          } else {
+            throw err;
+          }
         }
       }
-    }
-    // Mark remaining tickets as in_progress (they'll get full workflow when Ralph picks them up)
-    for (const ticket of epicTickets) {
-      if (
-        ticket.id !== firstTicket?.id &&
-        (ticket.status === "backlog" || ticket.status === "ready")
-      ) {
-        db.update(tickets).set({ status: "in_progress" }).where(eq(tickets.id, ticket.id)).run();
+
+      // Mark remaining tickets as in_progress (they'll get full workflow when Ralph picks them up)
+      for (const ticket of epicTickets) {
+        if (
+          ticket.id !== firstTicket?.id &&
+          (ticket.status === "backlog" || ticket.status === "ready")
+        ) {
+          db.update(tickets).set({ status: "in_progress" }).where(eq(tickets.id, ticket.id)).run();
+        }
       }
     }
 
     // Branch based on workingMethod setting
-    const workingMethod =
-      workingMethodOverride ||
-      (project.workingMethod as
-        | "auto"
-        | "claude-code"
-        | "vscode"
-        | "opencode"
-        | "cursor"
-        | "copilot-cli"
-        | "codex") ||
-      "auto";
     console.log(
-      `[brain-dump] Ralph launch: workingMethod="${workingMethod}" for project "${project.name}", timeout=${timeoutSeconds}s`
+      `[brain-dump] Ralph ${promptProfile.type} launch: workingMethod="${workingMethod}" for project "${project.name}", timeout=${timeoutSeconds}s`
     );
 
     if (
@@ -1726,13 +2262,18 @@ export const launchRalphForEpic = createServerFn({ method: "POST" })
       console.log(`[brain-dump] Using ${methodLabel} launch path`);
 
       // Generate context file for editor/CLI-based Ralph launch modes.
-      const contextContent = generateVSCodeContext(prd);
+      const contextContent = generateVSCodeContext(prd, promptProfile);
       const contextResult = await writeVSCodeContext(project.path, contextContent);
 
       if (!contextResult.success) {
-        // Rollback ticket statuses since launch failed
-        for (const ticket of epicTickets) {
-          db.update(tickets).set({ status: ticket.status }).where(eq(tickets.id, ticket.id)).run();
+        // Rollback implementation bootstrap only for the default implementation path.
+        if (startsImplementationWorkflow) {
+          for (const ticket of epicTickets) {
+            db.update(tickets)
+              .set({ status: ticket.status })
+              .where(eq(tickets.id, ticket.id))
+              .run();
+          }
         }
         return contextResult;
       }
@@ -1747,9 +2288,14 @@ export const launchRalphForEpic = createServerFn({ method: "POST" })
             : await launchInCopilotCli(project.path, contextResult.path, preferredTerminal);
 
       if (!launchResult.success) {
-        // Rollback ticket statuses since launch failed
-        for (const ticket of epicTickets) {
-          db.update(tickets).set({ status: ticket.status }).where(eq(tickets.id, ticket.id)).run();
+        // Rollback implementation bootstrap only for the default implementation path.
+        if (startsImplementationWorkflow) {
+          for (const ticket of epicTickets) {
+            db.update(tickets)
+              .set({ status: ticket.status })
+              .where(eq(tickets.id, ticket.id))
+              .run();
+          }
         }
         return launchResult;
       }
@@ -1759,21 +2305,21 @@ export const launchRalphForEpic = createServerFn({ method: "POST" })
         const terminalLabel = terminalUsed ?? "your terminal";
         return {
           success: true,
-          message: `Opening Copilot CLI in ${terminalLabel} for ${epicTickets.length} tickets. If no window appears, check that ${terminalLabel} is running.`,
+          message: `Opening Copilot CLI in ${terminalLabel} for ${launchedTicketCount} ticket${launchedTicketCount === 1 ? "" : "s"}. If no window appears, check that ${terminalLabel} is running.`,
           launchMethod: "copilot-cli" as const,
           contextFile: contextResult.path,
           ...(terminalUsed ? { terminalUsed } : {}),
-          ticketCount: epicTickets.length,
+          ticketCount: launchedTicketCount,
           warnings: sshWarnings,
         };
       }
 
       return {
         success: true,
-        message: `Opened ${methodLabel} with Ralph context for ${epicTickets.length} tickets. Check .claude/ralph-context.md for instructions.`,
+        message: `Opened ${methodLabel} with Ralph context for ${launchedTicketCount} ticket${launchedTicketCount === 1 ? "" : "s"}. Check .claude/ralph-context.md for instructions.`,
         launchMethod: workingMethod,
         contextFile: contextResult.path,
-        ticketCount: epicTickets.length,
+        ticketCount: launchedTicketCount,
         warnings: sshWarnings,
       };
     }
@@ -1788,10 +2334,10 @@ export const launchRalphForEpic = createServerFn({ method: "POST" })
 
     return {
       success: true,
-      message: `Launched Ralph for ${epicTickets.length} tickets in ${launchResult.terminal}`,
+      message: `Launched Ralph for ${launchedTicketCount} ticket${launchedTicketCount === 1 ? "" : "s"} in ${launchResult.terminal}.`,
       terminalUsed: launchResult.terminal,
       launchMethod: "terminal" as const,
-      ticketCount: epicTickets.length,
+      ticketCount: launchedTicketCount,
       warnings: sshWarnings,
     };
   });

@@ -346,6 +346,7 @@ function ensureBaseSchema(db: DbHandle, logger: Logger): void {
       file_path TEXT,
       line_number INTEGER,
       suggested_fix TEXT,
+      epic_review_run_id TEXT REFERENCES epic_review_runs(id) ON DELETE SET NULL,
       status TEXT NOT NULL DEFAULT 'open',
       fixed_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -355,6 +356,7 @@ function ensureBaseSchema(db: DbHandle, logger: Logger): void {
       id TEXT PRIMARY KEY,
       ticket_id TEXT NOT NULL UNIQUE REFERENCES tickets(id) ON DELETE CASCADE,
       steps TEXT NOT NULL,
+      epic_review_run_id TEXT REFERENCES epic_review_runs(id) ON DELETE SET NULL,
       generated_at TEXT NOT NULL DEFAULT (datetime('now')),
       completed_at TEXT,
       feedback TEXT,
@@ -373,6 +375,32 @@ function ensureBaseSchema(db: DbHandle, logger: Logger): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS epic_review_runs (
+      id TEXT PRIMARY KEY,
+      epic_id TEXT NOT NULL REFERENCES epics(id) ON DELETE CASCADE,
+      steering_prompt TEXT,
+      launch_mode TEXT NOT NULL,
+      provider TEXT,
+      status TEXT NOT NULL DEFAULT 'queued',
+      summary TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+      CREATE TABLE IF NOT EXISTS epic_review_run_tickets (
+        id TEXT PRIMARY KEY,
+        epic_review_run_id TEXT NOT NULL REFERENCES epic_review_runs(id) ON DELETE CASCADE,
+        ticket_id TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued',
+        summary TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
 
     CREATE TABLE IF NOT EXISTS claude_tasks (
       id TEXT PRIMARY KEY NOT NULL,
@@ -400,6 +428,12 @@ function ensureBaseSchema(db: DbHandle, logger: Logger): void {
 
     CREATE INDEX IF NOT EXISTS idx_workflow_ticket ON ticket_workflow_state(ticket_id);
     CREATE INDEX IF NOT EXISTS idx_epic_workflow_epic ON epic_workflow_state(epic_id);
+    CREATE INDEX IF NOT EXISTS idx_epic_review_runs_epic ON epic_review_runs(epic_id);
+    CREATE INDEX IF NOT EXISTS idx_epic_review_runs_status ON epic_review_runs(status);
+    CREATE INDEX IF NOT EXISTS idx_epic_review_runs_created ON epic_review_runs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_epic_review_run_tickets_run ON epic_review_run_tickets(epic_review_run_id);
+    CREATE INDEX IF NOT EXISTS idx_epic_review_run_tickets_ticket ON epic_review_run_tickets(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_epic_review_run_tickets_position ON epic_review_run_tickets(epic_review_run_id, position);
     CREATE INDEX IF NOT EXISTS idx_findings_ticket ON review_findings(ticket_id);
     CREATE INDEX IF NOT EXISTS idx_findings_status ON review_findings(status);
     CREATE INDEX IF NOT EXISTS idx_claude_tasks_ticket ON claude_tasks(ticket_id);
@@ -510,6 +544,94 @@ export function runMigrations(db: DbHandle, logger: Logger = silentLogger): void
   addColumnIfMissing(db, "epic_workflow_state", "pr_number", "INTEGER", logger);
   addColumnIfMissing(db, "epic_workflow_state", "pr_url", "TEXT", logger);
   addColumnIfMissing(db, "epic_workflow_state", "pr_status", "TEXT", logger);
+
+  // Epic review orchestration tables
+  if (!tableExists(db, "epic_review_runs")) {
+    db.prepare(
+      `
+      CREATE TABLE epic_review_runs (
+        id TEXT PRIMARY KEY,
+        epic_id TEXT NOT NULL REFERENCES epics(id) ON DELETE CASCADE,
+        steering_prompt TEXT,
+        launch_mode TEXT NOT NULL,
+        provider TEXT,
+        status TEXT NOT NULL DEFAULT 'queued',
+        summary TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `
+    ).run();
+    logger.info("Created epic_review_runs table");
+  }
+  if (!tableExists(db, "epic_review_run_tickets")) {
+    db.prepare(
+      `
+      CREATE TABLE epic_review_run_tickets (
+        id TEXT PRIMARY KEY,
+        epic_review_run_id TEXT NOT NULL REFERENCES epic_review_runs(id) ON DELETE CASCADE,
+        ticket_id TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued',
+        summary TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `
+    ).run();
+    logger.info("Created epic_review_run_tickets table");
+  }
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_epic_review_runs_epic ON epic_review_runs(epic_id)"
+  ).run();
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_epic_review_runs_status ON epic_review_runs(status)"
+  ).run();
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_epic_review_runs_created ON epic_review_runs(created_at)"
+  ).run();
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_epic_review_run_tickets_run ON epic_review_run_tickets(epic_review_run_id)"
+  ).run();
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_epic_review_run_tickets_ticket ON epic_review_run_tickets(ticket_id)"
+  ).run();
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_epic_review_run_tickets_position ON epic_review_run_tickets(epic_review_run_id, position)"
+  ).run();
+  addColumnIfMissing(
+    db,
+    "epic_review_run_tickets",
+    "status",
+    "TEXT NOT NULL DEFAULT 'queued'",
+    logger
+  );
+  addColumnIfMissing(db, "epic_review_run_tickets", "summary", "TEXT", logger);
+  addColumnIfMissing(db, "epic_review_run_tickets", "started_at", "TEXT", logger);
+  addColumnIfMissing(db, "epic_review_run_tickets", "completed_at", "TEXT", logger);
+  addColumnIfMissing(
+    db,
+    "review_findings",
+    "epic_review_run_id",
+    "TEXT REFERENCES epic_review_runs(id) ON DELETE SET NULL",
+    logger
+  );
+  addColumnIfMissing(
+    db,
+    "demo_scripts",
+    "epic_review_run_id",
+    "TEXT REFERENCES epic_review_runs(id) ON DELETE SET NULL",
+    logger
+  );
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_review_findings_run ON review_findings(epic_review_run_id)"
+  ).run();
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_demo_scripts_run ON demo_scripts(epic_review_run_id)"
+  ).run();
 
   // Ralph events table
   if (!tableExists(db, "ralph_events")) {

@@ -31,6 +31,13 @@ import type {
   DbDemoScriptRow,
   DbTicketWorkflowStateRow,
 } from "./db-rows.ts";
+import {
+  findLatestActiveEpicReviewRunIdForTicket,
+  getEpicReviewRunArtifactSummary,
+  listEpicReviewRunTicketLinks,
+  updateEpicReviewRun,
+  updateEpicReviewRunTicketLink,
+} from "./epic-review-run.ts";
 
 // ============================================
 // Internal Helpers
@@ -56,6 +63,7 @@ function toReviewFinding(row: DbReviewFindingRow): ReviewFinding {
     status: row.status as FindingStatus,
     createdAt: row.created_at,
   };
+  if (row.epic_review_run_id !== null) finding.epicReviewRunId = row.epic_review_run_id;
   if (row.file_path !== null) finding.filePath = row.file_path;
   if (row.line_number !== null) finding.lineNumber = row.line_number;
   if (row.suggested_fix !== null) finding.suggestedFix = row.suggested_fix;
@@ -76,11 +84,22 @@ function toDemoScript(row: DbDemoScriptRow): DemoScript {
     id: row.id,
     ticketId: row.ticket_id,
     steps,
+    ...(row.epic_review_run_id !== null ? { epicReviewRunId: row.epic_review_run_id } : {}),
     generatedAt: row.generated_at,
     executedAt: row.completed_at,
     feedback: row.feedback,
     passed: row.passed === null ? null : row.passed === 1,
   };
+}
+
+function buildEpicReviewRunCompletionSummary(
+  summary: ReturnType<typeof getEpicReviewRunArtifactSummary>,
+  ticketCounts?: { completedTickets: number; failedTickets: number }
+): string {
+  const ticketSection = ticketCounts
+    ? ` Tickets completed: ${ticketCounts.completedTickets}, failed launches: ${ticketCounts.failedTickets}.`
+    : "";
+  return `Focused review completed. Findings: ${summary.totalFindings} total, ${summary.fixedFindings} fixed, ${summary.openCritical} open critical, ${summary.openMajor} open major.${ticketSection} Demo generated: ${summary.demoGenerated ? "yes" : "no"}.`;
 }
 
 function getOrCreateWorkflowState(db: DbHandle, ticketId: string): DbTicketWorkflowStateRow {
@@ -145,13 +164,14 @@ export function submitFinding(db: DbHandle, params: SubmitFindingParams): Review
   }
 
   const workflowState = getOrCreateWorkflowState(db, ticketId);
+  const epicReviewRunId = findLatestActiveEpicReviewRunIdForTicket(db, ticketId);
 
   const findingId = randomUUID();
   const now = new Date().toISOString();
 
   db.prepare(
-    `INSERT INTO review_findings (id, ticket_id, iteration, agent, severity, category, description, file_path, line_number, suggested_fix, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`
+    `INSERT INTO review_findings (id, ticket_id, iteration, agent, severity, category, description, file_path, line_number, suggested_fix, epic_review_run_id, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`
   ).run(
     findingId,
     ticketId,
@@ -163,6 +183,7 @@ export function submitFinding(db: DbHandle, params: SubmitFindingParams): Review
     filePath ?? null,
     lineNumber ?? null,
     suggestedFix ?? null,
+    epicReviewRunId,
     now
   );
 
@@ -353,23 +374,25 @@ export function generateDemo(db: DbHandle, params: GenerateDemoParams): DemoScri
   }
 
   const now = new Date().toISOString();
+  const epicReviewRunId = findLatestActiveEpicReviewRunIdForTicket(db, ticketId);
   const existingDemo = db
-    .prepare("SELECT id FROM demo_scripts WHERE ticket_id = ?")
-    .get(ticketId) as { id: string } | undefined;
+    .prepare("SELECT id, epic_review_run_id FROM demo_scripts WHERE ticket_id = ?")
+    .get(ticketId) as { id: string; epic_review_run_id: string | null } | undefined;
 
   const demoId = existingDemo?.id ?? randomUUID();
+  const linkedEpicReviewRunId = epicReviewRunId ?? existingDemo?.epic_review_run_id ?? null;
 
   if (existingDemo) {
     db.prepare(
       `UPDATE demo_scripts
-       SET steps = ?, generated_at = ?, completed_at = NULL, feedback = NULL, passed = NULL
+       SET steps = ?, epic_review_run_id = ?, generated_at = ?, completed_at = NULL, feedback = NULL, passed = NULL
        WHERE ticket_id = ?`
-    ).run(JSON.stringify(steps), now, ticketId);
+    ).run(JSON.stringify(steps), linkedEpicReviewRunId, now, ticketId);
   } else {
     db.prepare(
-      `INSERT INTO demo_scripts (id, ticket_id, steps, generated_at)
-       VALUES (?, ?, ?, ?)`
-    ).run(demoId, ticketId, JSON.stringify(steps), now);
+      `INSERT INTO demo_scripts (id, ticket_id, steps, epic_review_run_id, generated_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(demoId, ticketId, JSON.stringify(steps), linkedEpicReviewRunId, now);
   }
 
   // Update workflow state (ensure it exists first)
@@ -383,6 +406,34 @@ export function generateDemo(db: DbHandle, params: GenerateDemoParams): DemoScri
     now,
     ticketId
   );
+
+  if (linkedEpicReviewRunId) {
+    updateEpicReviewRunTicketLink(db, {
+      epicReviewRunId: linkedEpicReviewRunId,
+      ticketId,
+      status: "completed",
+      completedAt: now,
+      summary: "Review completed and demo generated.",
+    });
+
+    const ticketLinks = listEpicReviewRunTicketLinks(db, linkedEpicReviewRunId);
+    const artifactSummary = getEpicReviewRunArtifactSummary(db, linkedEpicReviewRunId);
+    const hasActiveTickets = ticketLinks.some(
+      (link) => link.status === "queued" || link.status === "running"
+    );
+    const failedTickets = ticketLinks.filter((link) => link.status === "failed").length;
+    const completedTickets = ticketLinks.filter((link) => link.status === "completed").length;
+
+    updateEpicReviewRun(db, {
+      epicReviewRunId: linkedEpicReviewRunId,
+      status: hasActiveTickets ? "running" : "completed",
+      summary: buildEpicReviewRunCompletionSummary(artifactSummary, {
+        completedTickets,
+        failedTickets,
+      }),
+      completedAt: hasActiveTickets ? null : now,
+    });
+  }
 
   const row = db.prepare("SELECT * FROM demo_scripts WHERE id = ?").get(demoId) as DbDemoScriptRow;
   return toDemoScript(row);

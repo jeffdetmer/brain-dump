@@ -58,6 +58,19 @@ if (initializeWatcher(dbPath)) {
   console.log(`[DB] Database file watcher started`);
 }
 
+function columnExists(tableName: string, columnName: string): boolean {
+  const columns = sqlite.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+    name: string;
+  }>;
+  return columns.some((column) => column.name === columnName);
+}
+
+function ensureColumnExists(tableName: string, columnName: string, definition: string): void {
+  if (!columnExists(tableName, columnName)) {
+    sqlite.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
+}
+
 // Auto-create tables if they don't exist
 function initTables() {
   const projectsExists = sqlite
@@ -465,6 +478,162 @@ function initRalphSessions() {
 }
 
 initRalphSessions();
+
+function initReviewWorkflowTables() {
+  const workflowStateExists = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ticket_workflow_state'")
+    .get();
+
+  if (!workflowStateExists) {
+    console.log("Creating ticket_workflow_state table...");
+    sqlite.exec(`
+      CREATE TABLE ticket_workflow_state (
+        id TEXT PRIMARY KEY NOT NULL,
+        ticket_id TEXT NOT NULL UNIQUE REFERENCES tickets(id) ON DELETE CASCADE,
+        current_phase TEXT NOT NULL DEFAULT 'implementation',
+        review_iteration INTEGER NOT NULL DEFAULT 0,
+        findings_count INTEGER NOT NULL DEFAULT 0,
+        findings_fixed INTEGER NOT NULL DEFAULT 0,
+        demo_generated INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    sqlite.exec(`CREATE INDEX idx_workflow_ticket ON ticket_workflow_state (ticket_id)`);
+    console.log("ticket_workflow_state table created successfully");
+  }
+
+  const findingsExists = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='review_findings'")
+    .get();
+
+  if (!findingsExists) {
+    console.log("Creating review_findings table...");
+    sqlite.exec(`
+      CREATE TABLE review_findings (
+        id TEXT PRIMARY KEY NOT NULL,
+        ticket_id TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        iteration INTEGER NOT NULL,
+        agent TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        category TEXT NOT NULL,
+        description TEXT NOT NULL,
+        file_path TEXT,
+        line_number INTEGER,
+        suggested_fix TEXT,
+        epic_review_run_id TEXT REFERENCES epic_review_runs(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        fixed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    sqlite.exec(`CREATE INDEX idx_findings_ticket ON review_findings (ticket_id)`);
+    sqlite.exec(`CREATE INDEX idx_findings_status ON review_findings (status)`);
+    console.log("review_findings table created successfully");
+  }
+
+  const demoScriptsExists = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='demo_scripts'")
+    .get();
+
+  if (!demoScriptsExists) {
+    console.log("Creating demo_scripts table...");
+    sqlite.exec(`
+      CREATE TABLE demo_scripts (
+        id TEXT PRIMARY KEY NOT NULL,
+        ticket_id TEXT NOT NULL UNIQUE REFERENCES tickets(id) ON DELETE CASCADE,
+        steps TEXT NOT NULL,
+        epic_review_run_id TEXT REFERENCES epic_review_runs(id) ON DELETE SET NULL,
+        generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at TEXT,
+        feedback TEXT,
+        passed INTEGER
+      )
+    `);
+    console.log("demo_scripts table created successfully");
+  }
+
+  const epicReviewRunsExists = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='epic_review_runs'")
+    .get();
+
+  if (!epicReviewRunsExists) {
+    console.log("Creating epic_review_runs table...");
+    sqlite.exec(`
+      CREATE TABLE epic_review_runs (
+        id TEXT PRIMARY KEY NOT NULL,
+        epic_id TEXT NOT NULL REFERENCES epics(id) ON DELETE CASCADE,
+        steering_prompt TEXT,
+        launch_mode TEXT NOT NULL,
+        provider TEXT,
+        status TEXT NOT NULL DEFAULT 'queued',
+        summary TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    sqlite.exec(`CREATE INDEX idx_epic_review_runs_epic ON epic_review_runs (epic_id)`);
+    sqlite.exec(`CREATE INDEX idx_epic_review_runs_status ON epic_review_runs (status)`);
+    sqlite.exec(`CREATE INDEX idx_epic_review_runs_created ON epic_review_runs (created_at)`);
+    console.log("epic_review_runs table created successfully");
+  }
+
+  const epicReviewRunTicketsExists = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='epic_review_run_tickets'")
+    .get();
+
+  if (!epicReviewRunTicketsExists) {
+    console.log("Creating epic_review_run_tickets table...");
+    sqlite.exec(`
+      CREATE TABLE epic_review_run_tickets (
+        id TEXT PRIMARY KEY NOT NULL,
+        epic_review_run_id TEXT NOT NULL REFERENCES epic_review_runs(id) ON DELETE CASCADE,
+        ticket_id TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued',
+        summary TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    sqlite.exec(
+      `CREATE INDEX idx_epic_review_run_tickets_run ON epic_review_run_tickets (epic_review_run_id)`
+    );
+    sqlite.exec(
+      `CREATE INDEX idx_epic_review_run_tickets_ticket ON epic_review_run_tickets (ticket_id)`
+    );
+    sqlite.exec(
+      `CREATE INDEX idx_epic_review_run_tickets_position ON epic_review_run_tickets (epic_review_run_id, position)`
+    );
+    console.log("epic_review_run_tickets table created successfully");
+  }
+
+  ensureColumnExists(
+    "review_findings",
+    "epic_review_run_id",
+    "TEXT REFERENCES epic_review_runs(id) ON DELETE SET NULL"
+  );
+  ensureColumnExists("epic_review_run_tickets", "status", "TEXT NOT NULL DEFAULT 'queued'");
+  ensureColumnExists("epic_review_run_tickets", "summary", "TEXT");
+  ensureColumnExists("epic_review_run_tickets", "started_at", "TEXT");
+  ensureColumnExists("epic_review_run_tickets", "completed_at", "TEXT");
+  ensureColumnExists(
+    "demo_scripts",
+    "epic_review_run_id",
+    "TEXT REFERENCES epic_review_runs(id) ON DELETE SET NULL"
+  );
+  sqlite.exec(
+    `CREATE INDEX IF NOT EXISTS idx_review_findings_run ON review_findings (epic_review_run_id)`
+  );
+  sqlite.exec(
+    `CREATE INDEX IF NOT EXISTS idx_demo_scripts_run ON demo_scripts (epic_review_run_id)`
+  );
+}
+
+initReviewWorkflowTables();
 
 // Initialize conversation logging tables for enterprise compliance
 function initConversationLogging() {

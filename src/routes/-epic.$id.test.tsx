@@ -1,17 +1,19 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { EpicDetailPage } from "./epic.$id";
+import type { ComponentType } from "react";
+import { Route } from "./epic.$id";
 
 const mockShowToast = vi.hoisted(() => vi.fn());
 const mockPushBranchServerFn = vi.hoisted(() => vi.fn());
 const mockInvalidateQueries = vi.hoisted(() => vi.fn());
+const mockLaunchRalphForEpic = vi.hoisted(() => vi.fn());
 
 let epicDetailState: ReturnType<typeof createEpicDetail>;
 let mockRefetch: ReturnType<typeof vi.fn>;
 
 vi.mock("@tanstack/react-router", () => ({
-  createFileRoute: () => (config: unknown) => config,
+  createFileRoute: () => (config: Record<string, unknown>) => ({ ...config, options: config }),
   useParams: () => ({ id: "epic-1" }),
   useRouter: () => ({
     history: { back: vi.fn() },
@@ -32,6 +34,8 @@ vi.mock("@tanstack/react-query", async () => {
   };
 });
 
+const EpicDetailPage = Route.options.component as ComponentType;
+
 vi.mock("../api/ship-server-fns", () => ({
   pushBranchServerFn: mockPushBranchServerFn,
 }));
@@ -48,8 +52,9 @@ vi.mock("../lib/hooks", () => ({
       terminalEmulator: null,
     },
   }),
-  useLaunchRalphForTicket: () => ({
-    mutateAsync: vi.fn(),
+  useLaunchRalphForEpic: () => ({
+    mutateAsync: mockLaunchRalphForEpic,
+    isPending: false,
   }),
   useClickOutside: vi.fn(),
 }));
@@ -147,6 +152,7 @@ function createEpicDetail(overrides: Partial<Record<string, unknown>> = {}) {
       total: 0,
     },
     criticalFindings: [],
+    reviewRuns: [],
     workflowState: {
       epicBranchName: "feature/epic-ship",
       prNumber: null,
@@ -178,6 +184,10 @@ describe("EpicDetailPage ship entry points", () => {
     vi.clearAllMocks();
     epicDetailState = createEpicDetail();
     mockRefetch = vi.fn(async () => undefined);
+    mockLaunchRalphForEpic.mockResolvedValue({
+      success: true,
+      message: "Launched Ralph in terminal",
+    });
     mockPushBranchServerFn.mockResolvedValue({
       success: true,
       branchName: "feature/epic-ship",
@@ -267,5 +277,137 @@ describe("EpicDetailPage ship entry points", () => {
     expect(screen.getByText("Minor")).toBeInTheDocument();
     expect(screen.getByText("Suggestions")).toBeInTheDocument();
     expect(screen.getByText("5/10")).toBeInTheDocument();
+  });
+
+  it("shows focused review run summaries without duplicating ticket history", () => {
+    epicDetailState = createEpicDetail({
+      reviewRuns: [
+        {
+          id: "run-12345678",
+          status: "completed",
+          launchMode: "focused-review",
+          provider: "claude",
+          steeringPrompt: "Focus on silent failures.",
+          summary:
+            "Focused review completed. Findings: 2 total, 1 fixed, 0 open critical, 0 open major. Demo generated: yes.",
+          createdAt: "2026-03-09T05:00:00.000Z",
+          startedAt: "2026-03-09T05:00:00.000Z",
+          completedAt: "2026-03-09T05:15:00.000Z",
+          selectedTickets: [
+            {
+              id: "ticket-1",
+              title: "Ship modal",
+              status: "completed",
+              summary: "Review completed and demo generated.",
+            },
+          ],
+          findingsTotal: 2,
+          findingsFixed: 1,
+          demoGenerated: true,
+        },
+      ],
+    });
+
+    render(<EpicDetailPage />);
+
+    expect(screen.getByTestId("epic-review-runs")).toBeInTheDocument();
+    expect(screen.getByText("Focused Review Runs")).toBeInTheDocument();
+    expect(screen.getByText("Run run-1234")).toBeInTheDocument();
+    expect(
+      screen.getByText("Ship modal (completed: Review completed and demo generated.)")
+    ).toBeInTheDocument();
+    expect(screen.getByText("2 findings • 1 fixed • Demo generated")).toBeInTheDocument();
+    expect(screen.getByText(/Focus on silent failures\./)).toBeInTheDocument();
+  });
+
+  it("launches a focused review with selected ticket scope and optional steering text", async () => {
+    const user = userEvent.setup();
+
+    render(<EpicDetailPage />);
+
+    await user.click(screen.getByRole("button", { name: /review a ticket in this epic/i }));
+    await user.click(screen.getByLabelText(/select ship modal for focused review/i));
+    await user.type(
+      screen.getByLabelText(/how do you want to steer the review\?/i),
+      "Focus on loading states and silent failures."
+    );
+    await user.click(screen.getByRole("button", { name: /^claude$/i }));
+
+    await waitFor(() => {
+      expect(mockLaunchRalphForEpic).toHaveBeenCalledWith({
+        epicId: "epic-1",
+        preferredTerminal: null,
+        useSandbox: false,
+        aiBackend: "claude",
+        launchProfile: {
+          type: "review",
+          selectedTicketIds: ["ticket-1"],
+          steeringPrompt: "Focus on loading states and silent failures.",
+        },
+      });
+    });
+
+    expect(mockShowToast).toHaveBeenCalledWith("success", "Focused review launched for Ship modal");
+  });
+
+  it("disables provider buttons when no ticket is selected for focused review", async () => {
+    const user = userEvent.setup();
+
+    render(<EpicDetailPage />);
+
+    await user.click(screen.getByRole("button", { name: /review a ticket in this epic/i }));
+
+    const claudeButton = screen.getByRole("button", { name: /^claude$/i });
+    expect(claudeButton).toBeDisabled();
+    expect(mockLaunchRalphForEpic).not.toHaveBeenCalled();
+  });
+
+  it("fans out a focused review launch when the user selects more than one ticket", async () => {
+    const user = userEvent.setup();
+    epicDetailState = createEpicDetail({
+      ticketsByStatus: {
+        in_progress: 2,
+        done: 0,
+      },
+      tickets: [
+        {
+          id: "ticket-1",
+          title: "Ship modal",
+          status: "in_progress",
+        },
+        {
+          id: "ticket-2",
+          title: "Review launch copy",
+          status: "ready",
+        },
+      ],
+      workflowState: {
+        ...createEpicDetail().workflowState,
+        ticketsTotal: 2,
+      },
+    });
+
+    render(<EpicDetailPage />);
+
+    await user.click(screen.getByRole("button", { name: /review a ticket in this epic/i }));
+    await user.click(screen.getByLabelText(/select ship modal for focused review/i));
+    await user.click(screen.getByLabelText(/select review launch copy for focused review/i));
+    await user.click(screen.getByRole("button", { name: /^claude$/i }));
+
+    await waitFor(() => {
+      expect(mockLaunchRalphForEpic).toHaveBeenCalledWith({
+        epicId: "epic-1",
+        preferredTerminal: null,
+        useSandbox: false,
+        aiBackend: "claude",
+        launchProfile: {
+          type: "review",
+          selectedTicketIds: ["ticket-1", "ticket-2"],
+          steeringPrompt: "",
+        },
+      });
+    });
+
+    expect(mockShowToast).toHaveBeenCalledWith("success", "Focused review launched for 2 tickets");
   });
 });

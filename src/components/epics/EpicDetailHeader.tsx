@@ -32,7 +32,7 @@ import {
 } from "../../api/terminal";
 import { getTicketContext } from "../../api/context";
 import { queryKeys } from "../../lib/query-keys";
-import { useLaunchRalphForTicket, useSettings } from "../../lib/hooks";
+import { useLaunchRalphForEpic, useSettings } from "../../lib/hooks";
 
 export interface EpicDetailHeaderProps {
   epic: EpicDetailResult["epic"];
@@ -64,12 +64,15 @@ export function EpicDetailHeader({
   const [showLaunchMenu, setShowLaunchMenu] = useState(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [showFindingsModal, setShowFindingsModal] = useState(false);
-  const [launchingReviewTicketId, setLaunchingReviewTicketId] = useState<string | null>(null);
+  const [selectedReviewTicketIds, setSelectedReviewTicketIds] = useState<string[]>([]);
+  const [reviewSteeringPrompt, setReviewSteeringPrompt] = useState("");
+  const [reviewLaunchError, setReviewLaunchError] = useState<string | null>(null);
+  const [pendingReviewProvider, setPendingReviewProvider] = useState<string | null>(null);
   const launchMenuRef = useRef<HTMLDivElement>(null);
   const { showToast } = useToast();
   const settings = useSettings();
   const queryClient = useQueryClient();
-  const launchRalphMutation = useLaunchRalphForTicket();
+  const launchRalphMutation = useLaunchRalphForEpic();
 
   const ticketsTotal = Object.values(ticketsByStatus).reduce((a, b) => a + b, 0);
   const ticketsDone = ticketsByStatus["done"] ?? 0;
@@ -97,6 +100,18 @@ export function EpicDetailHeader({
     useCallback(() => setShowLaunchMenu(false), []),
     showLaunchMenu
   );
+
+  const handleOpenReviewModal = useCallback(() => {
+    setSelectedReviewTicketIds([]);
+    setReviewSteeringPrompt("");
+    setReviewLaunchError(null);
+    setShowReviewModal(true);
+  }, []);
+
+  const handleCloseReviewModal = useCallback(() => {
+    setShowReviewModal(false);
+    setReviewLaunchError(null);
+  }, []);
 
   const handleCopyBranch = useCallback(() => {
     const branchName = workflowState?.epicBranchName;
@@ -183,44 +198,89 @@ export function EpicDetailHeader({
     [tickets, settings, epic.title, showToast]
   );
 
-  const handleLaunchTicketReview = useCallback(
-    async function handleLaunchTicketReview(ticketId: string, ticketTitle: string): Promise<void> {
-      setLaunchingReviewTicketId(ticketId);
+  const handleToggleReviewTicket = useCallback((ticketId: string) => {
+    setSelectedReviewTicketIds((currentIds) =>
+      currentIds.includes(ticketId)
+        ? currentIds.filter((currentId) => currentId !== ticketId)
+        : [...currentIds, ticketId]
+    );
+    setReviewLaunchError(null);
+  }, []);
+
+  const handleLaunchFocusedReview = useCallback(
+    async (provider: {
+      aiBackend: "claude" | "opencode" | "codex";
+      workingMethodOverride?: "vscode" | "cursor" | "copilot-cli";
+      label: string;
+    }): Promise<void> => {
+      if (selectedReviewTicketIds.length === 0) {
+        setReviewLaunchError("Select at least one ticket to review.");
+        return;
+      }
+
+      setReviewLaunchError(null);
+      setPendingReviewProvider(provider.label);
 
       try {
         const result = await launchRalphMutation.mutateAsync({
-          ticketId,
+          epicId: epic.id,
           preferredTerminal: settings?.settings?.terminalEmulator ?? null,
           useSandbox: false,
-          aiBackend: "claude",
+          aiBackend: provider.aiBackend,
+          ...(provider.workingMethodOverride !== undefined
+            ? { workingMethodOverride: provider.workingMethodOverride }
+            : {}),
+          launchProfile: {
+            type: "review",
+            selectedTicketIds: selectedReviewTicketIds,
+            steeringPrompt: reviewSteeringPrompt,
+          },
         });
 
         if ("warnings" in result && result.warnings) {
           (result.warnings as string[]).forEach((warning) => showToast("info", warning));
         }
 
-        if (result.success) {
-          showToast("success", `Review launched for ${ticketTitle}`);
-          setShowReviewModal(false);
-          await Promise.all([
-            queryClient.invalidateQueries({ queryKey: queryKeys.epicDetail(epic.id) }),
-            queryClient.invalidateQueries({ queryKey: queryKeys.allTickets }),
-            queryClient.invalidateQueries({ queryKey: queryKeys.projectsWithEpics }),
-          ]);
+        if (!result.success) {
+          setReviewLaunchError(result.message);
+          showToast("error", result.message);
           return;
         }
 
-        showToast("error", result.message);
+        const selectedTicketTitles = reviewableTickets
+          .filter((ticket) => selectedReviewTicketIds.includes(ticket.id))
+          .map((ticket) => ticket.title);
+        const launchLabel =
+          selectedTicketTitles.length === 1
+            ? selectedTicketTitles[0]
+            : `${selectedTicketTitles.length} tickets`;
+
+        showToast("success", `Focused review launched for ${launchLabel}`);
+        setPendingReviewProvider(null);
+        setShowReviewModal(false);
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: queryKeys.epicDetail(epic.id) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.allTickets }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.projectsWithEpics }),
+        ]);
       } catch (error) {
-        showToast(
-          "error",
-          error instanceof Error ? error.message : "Failed to launch ticket review"
-        );
-      } finally {
-        setLaunchingReviewTicketId(null);
+        const message =
+          error instanceof Error ? error.message : "Failed to launch focused ticket review";
+        setPendingReviewProvider(null);
+        setReviewLaunchError(message);
+        showToast("error", message);
       }
     },
-    [epic.id, launchRalphMutation, queryClient, settings, showToast]
+    [
+      epic.id,
+      launchRalphMutation,
+      queryClient,
+      reviewSteeringPrompt,
+      reviewableTickets,
+      selectedReviewTicketIds,
+      settings,
+      showToast,
+    ]
   );
 
   const hasLaunchableTickets = tickets.some((t) => t.status !== "done");
@@ -259,7 +319,7 @@ export function EpicDetailHeader({
 
             <button
               type="button"
-              onClick={() => setShowReviewModal(true)}
+              onClick={handleOpenReviewModal}
               disabled={reviewableTickets.length === 0}
               style={{
                 ...secondaryActionButtonStyles,
@@ -590,55 +650,179 @@ export function EpicDetailHeader({
 
       <Modal
         isOpen={showReviewModal}
-        onClose={() => setShowReviewModal(false)}
-        title={`Review Ticket: ${epic.title}`}
+        onClose={handleCloseReviewModal}
+        title={`Focused Review: ${epic.title}`}
         maxWidth="xl"
         footer={
-          <button type="button" onClick={() => setShowReviewModal(false)} style={modalButtonStyles}>
-            Close
+          <button type="button" onClick={handleCloseReviewModal} style={modalButtonStyles}>
+            Cancel
           </button>
         }
       >
         <div style={modalContentStyles}>
           <p style={modalLeadStyles}>
-            Launch Ralph against a specific ticket in this epic. The selected ticket will re-enter
-            the active workflow and Ralph will drive review/fix/demo work from that ticket context.
+            Choose the ticket scope for a focused review run. This launches Ralph in review mode for
+            the selected ticket set instead of doing a generic implementation relaunch.
           </p>
 
           {reviewableTickets.length === 0 ? (
             <div style={emptyPanelStyles}>No tickets in this epic can be reviewed right now.</div>
           ) : (
-            <div style={modalListStyles}>
-              {reviewableTickets.map((ticket) => {
-                const openCriticalCount = openCriticalCounts.get(ticket.id) ?? 0;
-                const isLaunching = launchingReviewTicketId === ticket.id;
+            <div style={reviewFormStyles}>
+              <div style={reviewFormSectionStyles}>
+                <div style={reviewSectionHeaderStyles}>
+                  <strong>Select Tickets</strong>
+                  <span style={modalMetaStyles}>
+                    Pick the tickets you want Ralph to review from this epic.
+                  </span>
+                </div>
+                <div style={modalListStyles}>
+                  {reviewableTickets.map((ticket) => {
+                    const openCriticalCount = openCriticalCounts.get(ticket.id) ?? 0;
+                    const isSelected = selectedReviewTicketIds.includes(ticket.id);
 
-                return (
-                  <div key={ticket.id} style={modalListItemStyles}>
-                    <div style={modalListTextStyles}>
-                      <strong>{ticket.title}</strong>
-                      <span style={modalMetaStyles}>
-                        Status: {ticket.status}
-                        {openCriticalCount > 0
-                          ? ` • ${openCriticalCount} open critical finding${openCriticalCount === 1 ? "" : "s"}`
-                          : " • No open critical findings"}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void handleLaunchTicketReview(ticket.id, ticket.title)}
-                      disabled={Boolean(launchingReviewTicketId)}
-                      style={{
-                        ...modalButtonStyles,
-                        opacity: launchingReviewTicketId ? 0.7 : 1,
-                        cursor: launchingReviewTicketId ? "progress" : "pointer",
-                      }}
-                    >
-                      {isLaunching ? "Launching..." : "Review with Ralph"}
-                    </button>
-                  </div>
-                );
-              })}
+                    return (
+                      <label
+                        key={ticket.id}
+                        style={{
+                          ...reviewTicketOptionStyles,
+                          borderColor: isSelected
+                            ? "color-mix(in srgb, var(--accent-primary) 45%, var(--border-primary))"
+                            : "var(--border-primary)",
+                          background: isSelected
+                            ? "color-mix(in srgb, var(--accent-primary) 10%, var(--bg-tertiary))"
+                            : "var(--bg-tertiary)",
+                          cursor: launchRalphMutation.isPending ? "progress" : "pointer",
+                          opacity: launchRalphMutation.isPending ? 0.7 : 1,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          disabled={launchRalphMutation.isPending}
+                          onChange={() => handleToggleReviewTicket(ticket.id)}
+                          aria-label={`Select ${ticket.title} for focused review`}
+                        />
+                        <div style={modalListTextStyles}>
+                          <strong>{ticket.title}</strong>
+                          <span style={modalMetaStyles}>
+                            Status: {ticket.status}
+                            {openCriticalCount > 0
+                              ? ` • ${openCriticalCount} open critical finding${openCriticalCount === 1 ? "" : "s"}`
+                              : " • No open critical findings"}
+                          </span>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div style={reviewFormSectionStyles}>
+                <div style={reviewSectionHeaderStyles}>
+                  <strong>Review Steering</strong>
+                  <span style={modalMetaStyles}>Optional guidance to focus the review.</span>
+                </div>
+                <label style={reviewTextareaLabelStyles} htmlFor="epic-focused-review-steering">
+                  How do you want to steer the review?
+                </label>
+                <textarea
+                  id="epic-focused-review-steering"
+                  value={reviewSteeringPrompt}
+                  onChange={(event) => {
+                    setReviewSteeringPrompt(event.target.value);
+                    setReviewLaunchError(null);
+                  }}
+                  placeholder="Optional: focus on auth edge cases, UX regressions, loading states, silent failures..."
+                  disabled={launchRalphMutation.isPending}
+                  rows={5}
+                  style={reviewTextareaStyles}
+                />
+                <span style={modalMetaStyles}>
+                  Leave this blank to run the focused review with no extra steering.
+                </span>
+              </div>
+
+              {reviewLaunchError ? (
+                <div role="alert" style={reviewErrorStyles}>
+                  {reviewLaunchError}
+                </div>
+              ) : null}
+
+              <div style={reviewFormSectionStyles}>
+                <div style={reviewSectionHeaderStyles}>
+                  <strong>Launch via Ralph</strong>
+                  <span style={modalMetaStyles}>
+                    Each selected ticket runs as an isolated review session. The steering prompt
+                    above is injected into every session.
+                  </span>
+                </div>
+                <div style={reviewProviderGridStyles}>
+                  {[
+                    {
+                      label: "Claude",
+                      aiBackend: "claude" as const,
+                      icon: <Bot size={14} className="text-[var(--accent-ai)] flex-shrink-0" />,
+                    },
+                    {
+                      label: "Codex",
+                      aiBackend: "codex" as const,
+                      icon: <Terminal size={14} className="text-[var(--success)] flex-shrink-0" />,
+                    },
+                    {
+                      label: "VS Code",
+                      aiBackend: "claude" as const,
+                      workingMethodOverride: "vscode" as const,
+                      icon: (
+                        <Code2 size={14} className="text-[var(--accent-primary)] flex-shrink-0" />
+                      ),
+                    },
+                    {
+                      label: "Cursor",
+                      aiBackend: "claude" as const,
+                      workingMethodOverride: "cursor" as const,
+                      icon: <Monitor size={14} className="text-[var(--warning)] flex-shrink-0" />,
+                    },
+                    {
+                      label: "Copilot CLI",
+                      aiBackend: "claude" as const,
+                      workingMethodOverride: "copilot-cli" as const,
+                      icon: (
+                        <Github size={14} className="text-[var(--text-secondary)] flex-shrink-0" />
+                      ),
+                    },
+                    {
+                      label: "OpenCode",
+                      aiBackend: "opencode" as const,
+                      icon: <Code2 size={14} className="text-[var(--accent-ai)] flex-shrink-0" />,
+                    },
+                  ].map((p) => {
+                    const isThisOne = pendingReviewProvider === p.label;
+                    const isDisabled =
+                      launchRalphMutation.isPending || selectedReviewTicketIds.length === 0;
+                    return (
+                      <button
+                        key={p.label}
+                        type="button"
+                        onClick={() => void handleLaunchFocusedReview(p)}
+                        disabled={isDisabled}
+                        style={{
+                          ...reviewProviderButtonStyles,
+                          opacity: isDisabled ? 0.6 : 1,
+                          cursor: isDisabled ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {isThisOne ? (
+                          <LoaderCircle size={14} className="animate-spin flex-shrink-0" />
+                        ) : (
+                          p.icon
+                        )}
+                        <span className="text-sm text-[var(--text-primary)]">{p.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -1165,6 +1349,80 @@ const modalButtonStyles: React.CSSProperties = {
   fontSize: "var(--font-size-sm)",
   fontWeight: "var(--font-weight-medium)" as React.CSSProperties["fontWeight"],
   cursor: "pointer",
+};
+
+const reviewFormStyles: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--spacing-4)",
+};
+
+const reviewFormSectionStyles: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "var(--spacing-3)",
+};
+
+const reviewSectionHeaderStyles: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "4px",
+};
+
+const reviewTicketOptionStyles: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: "var(--spacing-3)",
+  padding: "var(--spacing-3)",
+  borderRadius: "var(--radius-md)",
+  border: "1px solid var(--border-primary)",
+  transition: "border-color 0.15s, background-color 0.15s, opacity 0.15s",
+};
+
+const reviewTextareaLabelStyles: React.CSSProperties = {
+  fontSize: "var(--font-size-sm)",
+  fontWeight: "var(--font-weight-medium)" as React.CSSProperties["fontWeight"],
+  color: "var(--text-primary)",
+};
+
+const reviewTextareaStyles: React.CSSProperties = {
+  width: "100%",
+  minHeight: "140px",
+  resize: "vertical",
+  padding: "var(--spacing-3)",
+  borderRadius: "var(--radius-md)",
+  border: "1px solid var(--border-primary)",
+  background: "var(--bg-primary)",
+  color: "var(--text-primary)",
+  font: "inherit",
+  lineHeight: 1.5,
+};
+
+const reviewErrorStyles: React.CSSProperties = {
+  padding: "var(--spacing-3)",
+  borderRadius: "var(--radius-md)",
+  border: "1px solid color-mix(in srgb, var(--accent-danger) 30%, transparent)",
+  background: "color-mix(in srgb, var(--accent-danger) 12%, transparent)",
+  color: "var(--accent-danger)",
+  lineHeight: 1.5,
+};
+
+const reviewProviderGridStyles: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, 1fr)",
+  gap: "var(--spacing-2)",
+};
+
+const reviewProviderButtonStyles: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "var(--spacing-2)",
+  borderRadius: "var(--radius-md)",
+  border: "1px solid var(--border-primary)",
+  padding: "var(--spacing-2) var(--spacing-3)",
+  textAlign: "left",
+  background: "var(--bg-tertiary)",
+  transition: "background-color 0.15s",
 };
 
 const findingStatusStyles: React.CSSProperties = {

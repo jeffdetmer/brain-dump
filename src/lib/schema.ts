@@ -634,6 +634,68 @@ export const epicWorkflowState = sqliteTable(
 export type EpicWorkflowState = typeof epicWorkflowState.$inferSelect;
 export type NewEpicWorkflowState = typeof epicWorkflowState.$inferInsert;
 
+// Epic review runs table - stores epic-level review orchestration records
+export const epicReviewRuns = sqliteTable(
+  "epic_review_runs",
+  {
+    id: text("id").primaryKey(),
+    epicId: text("epic_id")
+      .notNull()
+      .references(() => epics.id, { onDelete: "cascade" }),
+    steeringPrompt: text("steering_prompt"),
+    launchMode: text("launch_mode").notNull(),
+    provider: text("provider"),
+    status: text("status").notNull().default("queued"),
+    summary: text("summary"),
+    startedAt: text("started_at"),
+    completedAt: text("completed_at"),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+    updatedAt: text("updated_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (table) => [
+    index("idx_epic_review_runs_epic").on(table.epicId),
+    index("idx_epic_review_runs_status").on(table.status),
+    index("idx_epic_review_runs_created").on(table.createdAt),
+  ]
+);
+
+export type EpicReviewRun = typeof epicReviewRuns.$inferSelect;
+export type NewEpicReviewRun = typeof epicReviewRuns.$inferInsert;
+
+// Epic review run tickets table - preserves selected ticket membership per orchestration run
+export const epicReviewRunTickets = sqliteTable(
+  "epic_review_run_tickets",
+  {
+    id: text("id").primaryKey(),
+    epicReviewRunId: text("epic_review_run_id")
+      .notNull()
+      .references(() => epicReviewRuns.id, { onDelete: "cascade" }),
+    ticketId: text("ticket_id")
+      .notNull()
+      .references(() => tickets.id, { onDelete: "cascade" }),
+    position: integer("position").notNull().default(0),
+    status: text("status").notNull().default("queued"),
+    summary: text("summary"),
+    startedAt: text("started_at"),
+    completedAt: text("completed_at"),
+    createdAt: text("created_at")
+      .notNull()
+      .default(sql`(datetime('now'))`),
+  },
+  (table) => [
+    index("idx_epic_review_run_tickets_run").on(table.epicReviewRunId),
+    index("idx_epic_review_run_tickets_ticket").on(table.ticketId),
+    index("idx_epic_review_run_tickets_position").on(table.epicReviewRunId, table.position),
+  ]
+);
+
+export type EpicReviewRunTicket = typeof epicReviewRunTickets.$inferSelect;
+export type NewEpicReviewRunTicket = typeof epicReviewRunTickets.$inferInsert;
+
 // Review findings table - stores findings from code review agents
 export const reviewFindings = sqliteTable(
   "review_findings",
@@ -650,6 +712,9 @@ export const reviewFindings = sqliteTable(
     filePath: text("file_path"), // Optional file path affected
     lineNumber: integer("line_number"), // Optional line number
     suggestedFix: text("suggested_fix"), // Optional fix suggestion
+    epicReviewRunId: text("epic_review_run_id").references(() => epicReviewRuns.id, {
+      onDelete: "set null",
+    }),
     status: text("status").notNull().default("open"), // 'open', 'fixed', 'wont_fix', 'duplicate'
     fixedAt: text("fixed_at"), // When marked as fixed
     createdAt: text("created_at")
@@ -662,6 +727,7 @@ export const reviewFindings = sqliteTable(
     index("idx_review_findings_severity").on(table.severity),
     index("idx_review_findings_agent").on(table.agent),
     index("idx_review_findings_iteration").on(table.ticketId, table.iteration),
+    index("idx_review_findings_run").on(table.epicReviewRunId),
   ]
 );
 
@@ -678,6 +744,9 @@ export const demoScripts = sqliteTable(
       .unique()
       .references(() => tickets.id, { onDelete: "cascade" }),
     steps: text("steps").notNull(), // JSON array of demo step objects
+    epicReviewRunId: text("epic_review_run_id").references(() => epicReviewRuns.id, {
+      onDelete: "set null",
+    }),
     generatedAt: text("generated_at")
       .notNull()
       .default(sql`(datetime('now'))`),
@@ -688,6 +757,7 @@ export const demoScripts = sqliteTable(
   (table) => [
     index("idx_demo_scripts_ticket").on(table.ticketId),
     index("idx_demo_scripts_generated").on(table.generatedAt),
+    index("idx_demo_scripts_run").on(table.epicReviewRunId),
   ]
 );
 

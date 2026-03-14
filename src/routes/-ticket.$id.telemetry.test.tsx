@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ComponentType } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { TicketDetailPage } from "./ticket.$id";
+import { Route } from "./ticket.$id";
 import type { TelemetryStatsAvailable, TelemetryStatsResult } from "../api/telemetry";
 
 const mockShowToast = vi.hoisted(() => vi.fn());
@@ -11,7 +12,7 @@ const mockGetLatestTelemetrySession = vi.hoisted(() => vi.fn());
 const mockGetTicket = vi.hoisted(() => vi.fn());
 
 vi.mock("@tanstack/react-router", () => ({
-  createFileRoute: () => (config: unknown) => config,
+  createFileRoute: () => (config: Record<string, unknown>) => ({ ...config, options: config }),
   useParams: () => ({ id: "ticket-1" }),
   useRouter: () => ({
     history: { back: vi.fn() },
@@ -20,6 +21,8 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
   useCanGoBack: () => true,
 }));
+
+const TicketDetailPage = Route.options.component as ComponentType;
 
 vi.mock("../api/tickets", () => ({
   getTicket: mockGetTicket,
@@ -185,6 +188,7 @@ function createStatsResult(
     avgSessionDurationMs: 1200,
     mostUsedTools: [{ toolName: "Edit", count: 3 }],
     successRate: 100,
+    errorCount: 0,
     latestSession: {
       id: "session-1",
       ticketId: "ticket-1",
