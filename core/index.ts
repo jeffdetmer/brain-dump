@@ -60,6 +60,15 @@ export type {
   RalphSession,
   RalphEventType,
   RalphEvent,
+  CostModel,
+  TokenUsageRecord,
+  TokenCounts,
+  ModelCostBreakdown,
+  TicketCostResult,
+  EpicCostResult,
+  ProjectCostResult,
+  CostTrendEntry,
+  CostTrendResult,
   TelemetrySession,
   TelemetryEvent,
   GitCommandResult,
@@ -225,6 +234,28 @@ export type {
   ClearActiveSessionsResult,
 } from "./session.ts";
 
+// Cost tracking business logic
+export {
+  recordUsage,
+  getTicketCost,
+  getEpicCost,
+  getProjectCost,
+  getCostTrend,
+  computeCostFromTokens,
+  upsertCostModel,
+  listCostModels,
+  deleteCostModel,
+  seedCostModels,
+  recalculateCosts,
+} from "./cost.ts";
+
+export type {
+  RecordUsageParams,
+  UpsertCostModelParams,
+  CostTrendParams,
+  RecalculateResult,
+} from "./cost.ts";
+
 // Telemetry business logic
 export {
   startTelemetrySession,
@@ -344,13 +375,14 @@ export type {
 } from "./health.ts";
 
 // Learning reconciliation business logic
-export { reconcileLearnings, getEpicLearnings } from "./learnings.ts";
+export { reconcileLearnings, getEpicLearnings, autoExtractLearnings } from "./learnings.ts";
 
 export type {
   LearningEntry,
   DocUpdateResult,
   ReconcileLearningsResult,
   GetEpicLearningsResult,
+  AutoExtractLearningsResult,
 } from "./learnings.ts";
 
 // Compliance / conversation logging business logic

@@ -127,6 +127,14 @@ if [ -d "$SOURCE_HOOKS" ]; then
     cp -v "$SOURCE_HOOKS"/*.md "$GLOBAL_CLAUDE_DIR/hooks/" 2>/dev/null || true
     cp -v "$SOURCE_HOOKS"/*.json "$GLOBAL_CLAUDE_DIR/hooks/" 2>/dev/null || true
     chmod +x "$GLOBAL_CLAUDE_DIR/hooks"/*.sh 2>/dev/null || true
+    # Copy parser script alongside hooks so capture-token-usage.sh can find it globally
+    if [ -f "$BRAIN_DUMP_DIR/scripts/parse-transcript-tokens.ts" ]; then
+        if cp -v "$BRAIN_DUMP_DIR/scripts/parse-transcript-tokens.ts" "$GLOBAL_CLAUDE_DIR/hooks/" 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} parse-transcript-tokens.ts (token usage parser)"
+        else
+            echo -e "  ${RED}✗${NC} Failed to copy parse-transcript-tokens.ts"
+        fi
+    fi
     echo -e "${GREEN}Hook scripts installed:${NC}"
     ls "$GLOBAL_CLAUDE_DIR/hooks"/*.sh 2>/dev/null | xargs -I {} basename {} | sed 's/^/  • /'
 else
@@ -343,6 +351,9 @@ config.hooks = {
     },
     {
       hooks: [{ type: "command", command: "$HOME/.claude/hooks/mark-review-completed.sh" }]
+    },
+    {
+      hooks: [{ type: "command", command: "$HOME/.claude/hooks/capture-token-usage.sh" }]
     }
   ]
 };
@@ -466,6 +477,14 @@ else
             "command": "\$HOME/.claude/hooks/mark-review-completed.sh"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\$HOME/.claude/hooks/capture-token-usage.sh"
+          }
+        ]
       }
     ]
   }
@@ -500,7 +519,7 @@ echo "    • /review-epic - Run comprehensive Tracer Review on epic"
 echo "    • /demo - Generate demo script for human review"
 echo "    • /reconcile-learnings - Extract and apply learnings"
 echo ""
-echo -e "  ${GREEN}Hooks (~/.claude/hooks/) — 10 hooks:${NC}"
+echo -e "  ${GREEN}Hooks (~/.claude/hooks/) — 11 hooks:${NC}"
 echo "    • State enforcement for Ralph workflow (enforce-state-before-write)"
 echo "    • Review gating before push (enforce-review-before-push)"
 echo "    • Commit linking to tickets (link-commit-to-ticket)"
@@ -510,6 +529,7 @@ echo "    • Extended review chaining (chain-extended-review)"
 echo "    • Next ticket spawning (spawn-next-ticket, spawn-after-pr)"
 echo "    • Review completion marker (mark-review-completed)"
 echo "    • Library detection (detect-libraries)"
+echo "    • Token usage capture from JSONL transcripts (capture-token-usage)"
 echo ""
 echo -e "  ${GREEN}MCP Self-Telemetry (no hooks needed):${NC}"
 echo "    • Tool call instrumentation handled by MCP server"

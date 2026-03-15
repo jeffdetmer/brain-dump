@@ -76,6 +76,14 @@ export const queryKeys = {
     dashboard: () => ["analytics", "dashboard"] as const,
   },
 
+  // Cost
+  cost: {
+    dashboardAnalytics: () => ["cost", "dashboardAnalytics"] as const,
+    ticketCost: (ticketId: string) => ["cost", "ticket", ticketId] as const,
+    epicCost: (epicId: string) => ["cost", "epic", epicId] as const,
+    models: () => ["cost", "models"] as const,
+  },
+
   // Telemetry
   telemetry: {
     stats: (ticketId: string) => ["telemetry", "stats", ticketId] as const,

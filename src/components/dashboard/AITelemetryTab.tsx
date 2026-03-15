@@ -1,4 +1,4 @@
-import { type FC, useMemo, useEffect, useState } from "react";
+import { type FC, useMemo } from "react";
 import { Activity, Loader2, AlertCircle } from "lucide-react";
 import {
   BarChart,
@@ -20,46 +20,25 @@ import {
   sectionTitleStyles,
   sectionContentStyles,
 } from "./shared-styles";
+import {
+  useThemeColors,
+  formatShortDate,
+  tooltipStyle,
+  emptyChartStyle,
+  subtitleStyle,
+} from "./chart-utils";
 import type { DashboardTelemetryAnalytics } from "../../api/telemetry";
+import type { DashboardCostAnalytics } from "../../api/cost";
+import { CostTrendChart } from "./CostTrendChart";
+import { CostPerTicketChart } from "./CostPerTicketChart";
+import { CostByEpicChart } from "./CostByEpicChart";
 
 interface AITelemetryTabProps {
   analytics: DashboardTelemetryAnalytics;
   isLoading: boolean;
   error: Error | null;
-}
-
-// Resolve CSS variable values to actual colors for Recharts
-function getComputedColors() {
-  if (typeof window === "undefined") {
-    return {
-      primary: "#f97316",
-      ai: "#14b8a6",
-      secondary: "#ea580c",
-      success: "#22c55e",
-      error: "#ef4444",
-      warning: "#f59e0b",
-      muted: "#71717a",
-      border: "#374151",
-      bg: "#1e293b",
-      text: "#e2e8f0",
-      textSecondary: "#94a3b8",
-    };
-  }
-  const root = document.documentElement;
-  const style = getComputedStyle(root);
-  return {
-    primary: style.getPropertyValue("--accent-primary").trim() || "#f97316",
-    ai: style.getPropertyValue("--accent-ai").trim() || "#14b8a6",
-    secondary: style.getPropertyValue("--accent-secondary").trim() || "#ea580c",
-    success: style.getPropertyValue("--success").trim() || "#22c55e",
-    error: style.getPropertyValue("--error").trim() || "#ef4444",
-    warning: style.getPropertyValue("--warning").trim() || "#f59e0b",
-    muted: style.getPropertyValue("--text-tertiary").trim() || "#71717a",
-    border: style.getPropertyValue("--border-primary").trim() || "#374151",
-    bg: style.getPropertyValue("--bg-secondary").trim() || "#1e293b",
-    text: style.getPropertyValue("--text-primary").trim() || "#e2e8f0",
-    textSecondary: style.getPropertyValue("--text-secondary").trim() || "#94a3b8",
-  };
+  costAnalytics?: DashboardCostAnalytics | null | undefined;
+  costError?: Error | null | undefined;
 }
 
 const OUTCOME_COLORS: Record<string, string> = {
@@ -70,42 +49,15 @@ const OUTCOME_COLORS: Record<string, string> = {
   inProgress: "#3b82f6",
 };
 
-const tooltipStyle: React.CSSProperties = {
-  backgroundColor: "var(--bg-secondary)",
-  border: "none",
-  borderRadius: "var(--radius-md)",
-  padding: "var(--spacing-2)",
-  color: "var(--text-primary)",
-  fontSize: "var(--font-size-sm)",
-  boxShadow: "var(--shadow-lg)",
-};
-
-function formatShortDate(dateStr: string): string {
-  const date = new Date(dateStr);
-  return `${date.getMonth() + 1}/${date.getDate()}`;
-}
-
 /** Tool Call Distribution - horizontal bar chart */
 const ToolCallDistributionChart: FC<{
   data: DashboardTelemetryAnalytics["toolCallDistribution"];
 }> = ({ data }) => {
-  const [colors, setColors] = useState(getComputedColors());
-
-  useEffect(() => {
-    const update = () => setColors(getComputedColors());
-    update();
-    const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
-    return () => observer.disconnect();
-  }, []);
-
+  const colors = useThemeColors();
   const top10 = useMemo(() => data.slice(0, 10), [data]);
 
   if (top10.length === 0) {
-    return <EmptyState message="No tool call data yet" />;
+    return <div style={emptyChartStyle}>No tool call data yet</div>;
   }
 
   return (
@@ -113,9 +65,7 @@ const ToolCallDistributionChart: FC<{
       <div style={sectionHeaderStyles}>
         <Activity size={18} style={{ color: colors.primary }} aria-hidden="true" />
         <h3 style={sectionTitleStyles}>Tool Call Distribution</h3>
-        <span style={{ fontSize: "var(--font-size-xs)", color: "var(--text-tertiary)" }}>
-          Top {top10.length}
-        </span>
+        <span style={subtitleStyle}>Top {top10.length}</span>
       </div>
       <div style={sectionContentStyles}>
         <ResponsiveContainer width="100%" height={top10.length * 32 + 20}>
@@ -170,7 +120,7 @@ const SessionOutcomesChart: FC<{
           <h3 style={sectionTitleStyles}>Session Outcomes</h3>
         </div>
         <div style={sectionContentStyles}>
-          <EmptyState message="No session data yet" />
+          <div style={emptyChartStyle}>No session data yet</div>
         </div>
       </section>
     );
@@ -181,12 +131,10 @@ const SessionOutcomesChart: FC<{
       <div style={sectionHeaderStyles}>
         <Activity size={18} style={{ color: "var(--success)" }} aria-hidden="true" />
         <h3 style={sectionTitleStyles}>Session Outcomes</h3>
-        <span style={{ fontSize: "var(--font-size-xs)", color: "var(--text-tertiary)" }}>
-          {total} sessions
-        </span>
+        <span style={subtitleStyle}>{total} sessions</span>
       </div>
       <div style={sectionContentStyles}>
-        <ResponsiveContainer width="100%" height={200}>
+        <ResponsiveContainer width="100%" height={280}>
           <PieChart>
             <Pie
               data={pieData}
@@ -194,8 +142,8 @@ const SessionOutcomesChart: FC<{
               cy="50%"
               labelLine={false}
               label={({ name, value }) => `${name}: ${value}`}
-              outerRadius={75}
-              innerRadius={35}
+              outerRadius={80}
+              innerRadius={40}
               dataKey="value"
               stroke="var(--bg-secondary)"
               strokeWidth={2}
@@ -231,18 +179,7 @@ const SessionOutcomesChart: FC<{
 const EnvironmentBreakdownChart: FC<{
   data: DashboardTelemetryAnalytics["environmentBreakdown"];
 }> = ({ data }) => {
-  const [colors, setColors] = useState(getComputedColors());
-
-  useEffect(() => {
-    const update = () => setColors(getComputedColors());
-    update();
-    const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
-    return () => observer.disconnect();
-  }, []);
+  const colors = useThemeColors();
 
   if (data.length === 0) {
     return (
@@ -252,7 +189,7 @@ const EnvironmentBreakdownChart: FC<{
           <h3 style={sectionTitleStyles}>Environments</h3>
         </div>
         <div style={sectionContentStyles}>
-          <EmptyState message="No environment data yet" />
+          <div style={emptyChartStyle}>No environment data yet</div>
         </div>
       </section>
     );
@@ -265,7 +202,7 @@ const EnvironmentBreakdownChart: FC<{
         <h3 style={sectionTitleStyles}>Environments</h3>
       </div>
       <div style={sectionContentStyles}>
-        <ResponsiveContainer width="100%" height={data.length * 35 + 20}>
+        <ResponsiveContainer width="100%" height={Math.max(data.length * 42 + 20, 100)}>
           <BarChart
             data={data}
             layout="vertical"
@@ -299,27 +236,14 @@ const EnvironmentBreakdownChart: FC<{
 const SessionsOverTimeChart: FC<{
   data: DashboardTelemetryAnalytics["sessionsOverTime"];
 }> = ({ data }) => {
-  const [colors, setColors] = useState(getComputedColors());
-
-  useEffect(() => {
-    const update = () => setColors(getComputedColors());
-    update();
-    const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
-    return () => observer.disconnect();
-  }, []);
+  const colors = useThemeColors();
 
   return (
     <section style={sectionStyles}>
       <div style={sectionHeaderStyles}>
         <Activity size={18} style={{ color: colors.primary }} aria-hidden="true" />
         <h3 style={sectionTitleStyles}>Sessions Over Time</h3>
-        <span style={{ fontSize: "var(--font-size-xs)", color: "var(--text-tertiary)" }}>
-          Last 30 days
-        </span>
+        <span style={subtitleStyle}>Last 30 days</span>
       </div>
       <div style={sectionContentStyles}>
         <ResponsiveContainer width="100%" height={200}>
@@ -360,19 +284,7 @@ const SessionsOverTimeChart: FC<{
 const AvgDurationOverTimeChart: FC<{
   data: DashboardTelemetryAnalytics["avgDurationOverTime"];
 }> = ({ data }) => {
-  const [colors, setColors] = useState(getComputedColors());
-
-  useEffect(() => {
-    const update = () => setColors(getComputedColors());
-    update();
-    const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
-    return () => observer.disconnect();
-  }, []);
-
+  const colors = useThemeColors();
   const hasData = data.some((d) => d.avgMinutes > 0);
 
   return (
@@ -380,9 +292,7 @@ const AvgDurationOverTimeChart: FC<{
       <div style={sectionHeaderStyles}>
         <Activity size={18} style={{ color: colors.ai }} aria-hidden="true" />
         <h3 style={sectionTitleStyles}>Avg Session Duration</h3>
-        <span style={{ fontSize: "var(--font-size-xs)", color: "var(--text-tertiary)" }}>
-          Last 30 days
-        </span>
+        <span style={subtitleStyle}>Last 30 days</span>
       </div>
       <div style={sectionContentStyles}>
         {hasData ? (
@@ -412,88 +322,15 @@ const AvgDurationOverTimeChart: FC<{
             </LineChart>
           </ResponsiveContainer>
         ) : (
-          <EmptyState message="No duration data yet" />
+          <div style={emptyChartStyle}>No duration data yet</div>
         )}
       </div>
     </section>
   );
 };
-
-/** Token Usage Over Time - bar chart */
-const TokenUsageOverTimeChart: FC<{
-  data: DashboardTelemetryAnalytics["tokenUsageOverTime"];
-}> = ({ data }) => {
-  const [colors, setColors] = useState(getComputedColors());
-
-  useEffect(() => {
-    const update = () => setColors(getComputedColors());
-    update();
-    const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
-    return () => observer.disconnect();
-  }, []);
-
-  const hasData = data.some((d) => d.tokens > 0);
-
-  return (
-    <section style={sectionStyles}>
-      <div style={sectionHeaderStyles}>
-        <Activity size={18} style={{ color: colors.secondary }} aria-hidden="true" />
-        <h3 style={sectionTitleStyles}>Token Usage</h3>
-        <span style={{ fontSize: "var(--font-size-xs)", color: "var(--text-tertiary)" }}>
-          Last 30 days
-        </span>
-      </div>
-      <div style={sectionContentStyles}>
-        {hasData ? (
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={data}>
-              <CartesianGrid strokeDasharray="3 3" stroke={colors.border} />
-              <XAxis
-                dataKey="date"
-                tick={{ fontSize: 10, fill: colors.textSecondary }}
-                stroke={colors.border}
-                tickFormatter={formatShortDate}
-              />
-              <YAxis tick={{ fontSize: 10, fill: colors.textSecondary }} stroke={colors.border} />
-              <Tooltip
-                contentStyle={tooltipStyle}
-                labelFormatter={(label: string) => new Date(label).toLocaleDateString()}
-                formatter={(value: number) => [value.toLocaleString(), "Tokens"]}
-              />
-              <Bar dataKey="tokens" fill={colors.secondary} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        ) : (
-          <EmptyState message="No token usage data yet" />
-        )}
-      </div>
-    </section>
-  );
-};
-
-function EmptyState({ message }: { message: string }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        height: 120,
-        color: "var(--text-tertiary)",
-        fontSize: "var(--font-size-sm)",
-      }}
-    >
-      {message}
-    </div>
-  );
-}
 
 /**
- * AITelemetryTab - Full AI Telemetry dashboard tab with 6 interactive charts.
+ * AITelemetryTab - Full AI Telemetry dashboard tab with interactive charts.
  *
  * Charts:
  * 1. Tool Call Distribution (horizontal bar)
@@ -501,9 +338,17 @@ function EmptyState({ message }: { message: string }) {
  * 3. Environment Breakdown (horizontal bar)
  * 4. Sessions Over Time (line, 30 days)
  * 5. Avg Session Duration (line, 30 days)
- * 6. Token Usage (bar, 30 days)
+ * 6. Cost Trend (line, 30 days)
+ * 7. Cost per Ticket (bar)
+ * 8. Cost by Epic (horizontal bar)
  */
-export const AITelemetryTab: FC<AITelemetryTabProps> = ({ analytics, isLoading, error }) => {
+export const AITelemetryTab: FC<AITelemetryTabProps> = ({
+  analytics,
+  isLoading,
+  error,
+  costAnalytics,
+  costError,
+}) => {
   if (isLoading) {
     return (
       <div
@@ -550,7 +395,25 @@ export const AITelemetryTab: FC<AITelemetryTabProps> = ({ analytics, isLoading, 
       <EnvironmentBreakdownChart data={analytics.environmentBreakdown} />
       <SessionsOverTimeChart data={analytics.sessionsOverTime} />
       <AvgDurationOverTimeChart data={analytics.avgDurationOverTime} />
-      <TokenUsageOverTimeChart data={analytics.tokenUsageOverTime} />
+      {costError ? (
+        <section style={sectionStyles}>
+          <div style={sectionHeaderStyles}>
+            <AlertCircle size={18} style={{ color: "var(--accent-danger)" }} aria-hidden="true" />
+            <h3 style={sectionTitleStyles}>Cost Analytics</h3>
+          </div>
+          <div style={sectionContentStyles}>
+            <div style={emptyChartStyle} role="alert">
+              Failed to load cost data: {costError.message}
+            </div>
+          </div>
+        </section>
+      ) : costAnalytics ? (
+        <>
+          <CostTrendChart data={costAnalytics.costTrend} />
+          <CostPerTicketChart data={costAnalytics.costPerTicket} />
+          <CostByEpicChart data={costAnalytics.costByEpic} />
+        </>
+      ) : null}
     </div>
   );
 };

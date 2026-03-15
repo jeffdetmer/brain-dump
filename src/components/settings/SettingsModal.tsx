@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { X, Bot, GitBranch, Settings, Building2 } from "lucide-react";
+import { X, Bot, GitBranch, Settings, Building2, DollarSign } from "lucide-react";
 import { useForm } from "@tanstack/react-form-start";
 import {
   useSettings,
@@ -14,6 +14,7 @@ import { GeneralTab } from "./GeneralTab";
 import { RalphTab } from "./RalphTab";
 import { GitTab } from "./GitTab";
 import { EnterpriseTab } from "./EnterpriseTab";
+import { CostModelSettings } from "./CostModelSettings";
 import { settingsFormOpts } from "./settings-form-opts";
 import { settingsFormSchema, type SettingsFormData } from "./settings-form-schema";
 
@@ -23,20 +24,21 @@ interface SettingsModalProps {
 }
 
 /** Settings tab identifiers */
-type SettingsTabId = "general" | "ralph" | "git" | "enterprise";
+type SettingsTabId = "general" | "ralph" | "git" | "enterprise" | "pricing";
 
 const SETTINGS_TABS: Tab[] = [
   { id: "general", label: "General", icon: Settings },
   { id: "ralph", label: "Ralph", icon: Bot },
   { id: "git", label: "Git", icon: GitBranch },
   { id: "enterprise", label: "Enterprise", icon: Building2 },
+  { id: "pricing", label: "AI Pricing", icon: DollarSign },
 ];
 
 /**
  * SettingsModal - Modal for configuring application settings.
  *
  * Features:
- * - **Tabbed navigation**: 4 tabs using TabNav component (General, Ralph, Git, Enterprise)
+ * - **Tabbed navigation**: 5 tabs using TabNav component (General, Ralph, Git, Enterprise, AI Pricing)
  * - **Form state preservation**: Tab switching preserves all form values
  * - **Keyboard accessible**: Escape to close, Tab/Arrow key navigation
  * - **Save/Cancel**: Footer buttons to save changes or cancel
@@ -222,7 +224,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-modal-title"
-        className="relative bg-[var(--bg-secondary)] rounded-lg w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col"
+        className="relative bg-[var(--bg-secondary)] rounded-lg w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col"
         style={{
           boxShadow: "var(--shadow-modal)",
         }}
@@ -289,6 +291,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
               />
               <GitTab isActive={activeTab === "git"} form={form} />
               <EnterpriseTab isActive={activeTab === "enterprise"} form={form} />
+              <CostModelSettings isActive={activeTab === "pricing"} />
             </>
           )}
         </div>
