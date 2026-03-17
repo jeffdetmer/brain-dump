@@ -9,7 +9,7 @@
  * - Detail panel with stage breakdown
  */
 
-import { type FC, useState, useCallback, Suspense, lazy } from "react";
+import { type FC, useState, useCallback, useMemo, Suspense, lazy } from "react";
 import type { CostExplorerNode, CostExplorerParams } from "../../../core/types.ts";
 import { useCostExplorer, useCostExplorerSummary } from "../../lib/hooks";
 import { CostSummaryCards } from "./CostSummaryCards";
@@ -54,8 +54,13 @@ export const CostExplorerTab: FC = () => {
   const [viewMode, setViewMode] = useState<ChartViewMode>("treemap");
   const [selectedNode, setSelectedNode] = useState<CostExplorerNode | null>(null);
 
-  const sinceValue = timeRangeToSince(timeRange);
-  const params: CostExplorerParams = sinceValue ? { since: sinceValue } : {};
+  // Memoize to prevent infinite refetch loop — timeRangeToSince uses Date.now()
+  // which changes every millisecond, creating a new query key each render
+  const sinceValue = useMemo(() => timeRangeToSince(timeRange), [timeRange]);
+  const params = useMemo<CostExplorerParams>(
+    () => (sinceValue ? { since: sinceValue } : {}),
+    [sinceValue]
+  );
 
   const { data: tree, isLoading, isPlaceholderData, error } = useCostExplorer(params);
   const { data: summary } = useCostExplorerSummary(params);

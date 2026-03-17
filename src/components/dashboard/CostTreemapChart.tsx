@@ -23,7 +23,6 @@ import { formatUsd } from "./chart-utils";
 import {
   formatTokenCount,
   getStageColor,
-  getStageColorDark,
   getEpicGradient,
   glowColor,
   type ChartViewMode,
@@ -67,10 +66,7 @@ function toEChartsData(
           : getEpicGradient(index, node.metadata?.color as string | undefined);
 
       item.itemStyle = {
-        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color: gradient.top },
-          { offset: 1, color: gradient.bottom },
-        ]),
+        color: gradient.top,
         borderRadius: 4,
       };
       item.emphasis = {
@@ -84,12 +80,8 @@ function toEChartsData(
       };
     } else if (node.type === "stage") {
       const color = getStageColor(node.name);
-      const dark = getStageColorDark(node.name);
       item.itemStyle = {
-        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color },
-          { offset: 1, color: dark },
-        ]),
+        color,
         borderRadius: 3,
       };
       item.emphasis = {
@@ -302,7 +294,16 @@ export const CostTreemapChart: FC<CostTreemapChartProps> = ({ data, viewMode, on
   const rootTotal = data.costUsd;
 
   const treemapData = useMemo(
-    () => toEChartsData(data.children ?? [], rootTotal),
+    () => [
+      {
+        name: "Overview",
+        value: rootTotal,
+        id: "root-overview",
+        groupId: "root-overview",
+        children: toEChartsData(data.children ?? [], rootTotal),
+        itemStyle: { borderWidth: 0, gapWidth: 0 },
+      },
+    ],
     [data.children, rootTotal]
   );
 
@@ -415,7 +416,7 @@ export const CostTreemapChart: FC<CostTreemapChartProps> = ({ data, viewMode, on
           type: "treemap",
           data: treemapData,
           roam: false,
-          nodeClick: false, // We handle drill-down manually via dispatchAction
+          nodeClick: "zoomToNode",
           breadcrumb: {
             show: true,
             top: 6,
@@ -440,9 +441,15 @@ export const CostTreemapChart: FC<CostTreemapChartProps> = ({ data, viewMode, on
               },
             },
           },
-          // Show 1 level at a time — click to drill down
-          leafDepth: 1,
+          // Show 2 levels at a time (root container + epics) — click to drill down
+          leafDepth: 2,
           levels: [
+            {
+              // Root level (invisible container wrapper)
+              itemStyle: { borderWidth: 0, gapWidth: 0 },
+              upperLabel: { show: false },
+              label: { show: false },
+            },
             {
               // Epic level — bold borders, strong gradients
               itemStyle: {
@@ -523,6 +530,7 @@ export const CostTreemapChart: FC<CostTreemapChartProps> = ({ data, viewMode, on
               const val = params.value as number;
               if (val < 0.01) return "";
               const name = params.name as string;
+              if (!name || name === "Overview") return "";
               const displayName = name.length > 30 ? name.substring(0, 28) + "…" : name;
               return `{name|${displayName}}\n{cost|$${val.toFixed(2)}}`;
             },
@@ -580,25 +588,14 @@ export const CostTreemapChart: FC<CostTreemapChartProps> = ({ data, viewMode, on
       const nodeData = treeNode?.nodeData as CostExplorerNode | undefined;
       if (!nodeData) return;
 
-      // Update detail panel
+      // Update detail panel (drill-down zoom is handled natively via nodeClick: "zoomToNode")
       if (onNodeSelect) {
         onNodeSelect(nodeData);
-      }
-
-      // For treemap: manually dispatch drill-down zoom
-      if (viewMode === "treemap") {
-        const instance = chartRef.current?.getEchartsInstance();
-        if (instance && nodeData.children && nodeData.children.length > 0) {
-          instance.dispatchAction({
-            type: "treemapRootToNode",
-            targetNodeId: nodeData.id,
-          });
-        }
       }
     };
 
     return { click: handleClick };
-  }, [onNodeSelect, viewMode]);
+  }, [onNodeSelect]);
 
   // Resize ECharts when the container is resized by the user — must be before early return
   const wrapperRef = useRef<HTMLDivElement>(null);
