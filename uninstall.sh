@@ -770,7 +770,7 @@ remove_codex() {
     if [ -f "$CODEX_CONFIG" ] && grep -q '\[mcp_servers\.brain-dump\]' "$CODEX_CONFIG"; then
         if command -v perl >/dev/null 2>&1; then
             # Remove the brain-dump MCP table block only, keep the rest of config intact.
-            perl -0777 -i.bak -pe 's/\n?#\s*Brain Dump MCP server\s*\n\[mcp_servers\.brain-dump\]\n(?:[^\[]*\n)*//g; s/\n?\[mcp_servers\.brain-dump\]\n(?:[^\[]*\n)*//g' "$CODEX_CONFIG" || true
+            perl -0777 -i.bak -pe 's/\n?#\s*Brain Dump MCP server\s*\n\[mcp_servers\.brain-dump\]\n(?:(?!\[)[^\n]*\n)*//g; s/\n?\[mcp_servers\.brain-dump\]\n(?:(?!\[)[^\n]*\n)*//g' "$CODEX_CONFIG" || true
             rm -f "$CODEX_CONFIG.bak"
             print_success "Removed brain-dump MCP server from ~/.codex/config.toml"
             REMOVED+=("Codex MCP server")

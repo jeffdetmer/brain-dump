@@ -85,6 +85,7 @@ else
     if perl -0777 -i -pe '
       s/\n?# Brain Dump MCP server\s*\ncommand = "node"\s*\nargs = \["[^"\n]*mcp-server\/dist\/index\.js"\]\s*\nenv = \{ BRAIN_DUMP_PATH = "[^"\n]*", CODEX = "1" \}\s*\n/\n/gs;
       s/\n?command = "node"\s*\nargs = \["[^"\n]*mcp-server\/dist\/index\.js"\]\s*\nenv = \{ BRAIN_DUMP_PATH = "[^"\n]*", CODEX = "1" \}\s*\n/\n/gs;
+      s/\n?args = \["[^"\n]*mcp-server\/dist\/index\.js"\]\s*\nenv = \{ BRAIN_DUMP_PATH = "[^"\n]*", CODEX = "1" \}\s*\n/\n/gs;
     ' "$CODEX_CONFIG"; then
       rm -f "$CODEX_CONFIG.bak"
       echo -e "${YELLOW}⚠ Cleaned up malformed Brain Dump keys from config.toml${NC}"
