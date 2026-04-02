@@ -361,6 +361,19 @@ run_migrations() {
 
     print_info "Running database migrations..."
 
+    local repair_check_status=0
+    pnpm db:repair:check >/dev/null 2>&1 || repair_check_status=$?
+    if [ $repair_check_status -eq 10 ]; then
+        print_warning "Detected database schema without a Drizzle journal — running repair first..."
+        if ! pnpm db:repair; then
+            print_error "Database repair failed"
+            FAILED+=("Database repair")
+            return 1
+        fi
+    elif [ $repair_check_status -ne 0 ]; then
+        print_warning "Could not inspect migration journal; continuing with normal migrate"
+    fi
+
     # Capture migration output to check for "already exists" errors
     local migration_output
     migration_output=$(pnpm db:migrate 2>&1)
@@ -370,7 +383,12 @@ run_migrations() {
         print_success "Database migrations complete"
         INSTALLED+=("Database")
         return 0
-    elif echo "$migration_output" | grep -q "already exists"; then
+    else
+        repair_check_status=0
+        pnpm db:repair:check >/dev/null 2>&1 || repair_check_status=$?
+    fi
+
+    if echo "$migration_output" | grep -q "already exists" || [ $repair_check_status -eq 10 ]; then
         # The database exists but the migration journal is out of sync —
         # this happens when the DB was created outside of Drizzle (e.g. a
         # previous install or manual schema setup). Run the repair script to

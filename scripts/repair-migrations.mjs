@@ -40,6 +40,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 const migrationsFolder = path.join(projectRoot, "drizzle");
 const journalPath = path.join(migrationsFolder, "meta", "_journal.json");
+const REQUIRED_APP_TABLES = ["projects", "epics", "tickets"];
 
 function getDbPath() {
   const platform = process.platform;
@@ -62,6 +63,28 @@ function getDbPath() {
   const dataHome =
     process.env.XDG_DATA_HOME || path.join(process.env.HOME, ".local", "share");
   return path.join(dataHome, "brain-dump", "brain-dump.db");
+}
+
+function getMigrationState(db) {
+  const tableRows = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+    .all()
+    .map((row) => row.name);
+  const tables = new Set(tableRows);
+  const hasAppSchema = REQUIRED_APP_TABLES.some((tableName) => tables.has(tableName));
+  const hasJournalTable = tables.has("__drizzle_migrations");
+
+  let journalCount = 0;
+  if (hasJournalTable) {
+    journalCount = db.prepare("SELECT COUNT(*) AS count FROM __drizzle_migrations").get().count;
+  }
+
+  return {
+    hasAppSchema,
+    hasJournalTable,
+    journalCount,
+    needsRepair: hasAppSchema && journalCount === 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -108,12 +131,29 @@ function main() {
   const dbPath = getDbPath();
 
   if (!fs.existsSync(dbPath)) {
+    if (process.argv.includes("--check")) {
+      console.log(`ok: no database found at ${dbPath}`);
+      process.exit(0);
+    }
     console.log(`No database found at ${dbPath} — nothing to repair.`);
     process.exit(0);
   }
 
-  console.log(`Repairing database: ${dbPath}`);
   const db = new Database(dbPath);
+  const state = getMigrationState(db);
+
+  if (process.argv.includes("--check")) {
+    const summary = `db=${dbPath} schema=${state.hasAppSchema} journal=${state.journalCount}`;
+    db.close();
+    if (state.needsRepair) {
+      console.log(`repair-needed: ${summary}`);
+      process.exit(10);
+    }
+    console.log(`ok: ${summary}`);
+    process.exit(0);
+  }
+
+  console.log(`Repairing database: ${dbPath}`);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (

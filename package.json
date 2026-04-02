@@ -33,6 +33,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:repair": "node scripts/repair-migrations.mjs",
+    "db:repair:check": "node scripts/repair-migrations.mjs --check",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "ralph:build-sandbox": "docker build -t brain-dump-ralph-sandbox:latest -f docker/ralph-sandbox.Dockerfile docker/",
