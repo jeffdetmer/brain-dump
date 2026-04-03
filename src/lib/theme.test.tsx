@@ -115,6 +115,12 @@ describe("Theme System", () => {
         "midnight",
         "volt",
         "carbon",
+        "royal",
+        "summit",
+        "vice",
+        "patriot",
+        "crescent",
+        "equinox",
         // Legacy
         "ember",
         "solar",
@@ -122,6 +128,12 @@ describe("Theme System", () => {
         "daylight",
         "frost",
         "paper",
+        "harbor",
+        "grove",
+        "horizon",
+        "petal",
+        "linen",
+        "oasis",
       ]);
     });
   });

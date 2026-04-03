@@ -34,11 +34,23 @@ export type Theme =
   | "midnight"
   | "volt"
   | "carbon"
+  | "royal"
+  | "summit"
+  | "vice"
+  | "patriot"
+  | "crescent"
+  | "equinox"
   | "ember"
   | "solar"
   | "daylight"
   | "frost"
-  | "paper";
+  | "paper"
+  | "harbor"
+  | "grove"
+  | "horizon"
+  | "petal"
+  | "linen"
+  | "oasis";
 
 /**
  * Theme context value returned by useTheme hook.
@@ -68,6 +80,12 @@ export const THEMES: readonly Theme[] = [
   "midnight",
   "volt",
   "carbon",
+  "royal",
+  "summit",
+  "vice",
+  "patriot",
+  "crescent",
+  "equinox",
   // Legacy (hidden from picker, still valid for existing users)
   "ember",
   "solar",
@@ -75,6 +93,12 @@ export const THEMES: readonly Theme[] = [
   "daylight",
   "frost",
   "paper",
+  "harbor",
+  "grove",
+  "horizon",
+  "petal",
+  "linen",
+  "oasis",
 ] as const;
 
 /** Dark themes shown in theme picker */
@@ -88,10 +112,26 @@ export const DARK_THEMES: readonly Theme[] = [
   "midnight",
   "volt",
   "carbon",
+  "royal",
+  "summit",
+  "vice",
+  "patriot",
+  "crescent",
+  "equinox",
 ] as const;
 
 /** Light themes */
-export const LIGHT_THEMES: readonly Theme[] = ["daylight", "frost", "paper"] as const;
+export const LIGHT_THEMES: readonly Theme[] = [
+  "daylight",
+  "frost",
+  "paper",
+  "harbor",
+  "grove",
+  "horizon",
+  "petal",
+  "linen",
+  "oasis",
+] as const;
 
 /** Check if a theme is a light theme */
 export function isLightTheme(theme: Theme): boolean {
