@@ -59,6 +59,7 @@ import {
 } from "../api/terminal";
 import { safeJsonParse } from "../lib/utils";
 import { ticketFormOpts } from "./tickets/ticket-form-opts";
+import { RemovableCopyableTagPill } from "./tickets/TagInput";
 import {
   ticketFormSchema,
   type TicketFormData,
@@ -894,9 +895,8 @@ export default function TicketModal({ ticket, epics, onClose, onUpdate }: Ticket
     if (values.priority) {
       updates.priority = values.priority;
     }
-    if (values.tags.length > 0) {
-      updates.tags = values.tags;
-    }
+    // Always send tags (including []) so clearing the last tag persists.
+    updates.tags = values.tags;
     if (values.acceptanceCriteria.length > 0) {
       updates.acceptanceCriteria = values.acceptanceCriteria;
     }
@@ -1327,18 +1327,12 @@ export default function TicketModal({ ticket, epics, onClose, onUpdate }: Ticket
                 {formTags.length > 0 && (
                   <div className="flex flex-wrap gap-1.5 mb-2">
                     {formTags.map((tag) => (
-                      <span
+                      <RemovableCopyableTagPill
                         key={tag}
-                        className="flex items-center gap-1 px-2 py-0.5 bg-[var(--bg-card)] border border-[var(--border-primary)] text-[var(--text-secondary)] rounded-lg text-xs font-mono"
-                      >
-                        {tag}
-                        <button
-                          onClick={() => removeTag(tag)}
-                          className="hover:text-[var(--accent-danger)]"
-                        >
-                          <X size={10} />
-                        </button>
-                      </span>
+                        tag={tag}
+                        onRemove={() => removeTag(tag)}
+                        disabled={updateTicketMutation.isPending}
+                      />
                     ))}
                   </div>
                 )}
