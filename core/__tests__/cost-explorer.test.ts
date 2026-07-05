@@ -86,6 +86,7 @@ describe("cost model defaults", () => {
       .map((model) => model.modelName);
 
     expect(anthropicModels).toEqual([
+      "claude-fable-5",
       "claude-haiku-3",
       "claude-haiku-3-5",
       "claude-haiku-4-5",
@@ -100,6 +101,7 @@ describe("cost model defaults", () => {
       "claude-sonnet-4",
       "claude-sonnet-4-5",
       "claude-sonnet-4-6",
+      "claude-sonnet-5",
     ]);
 
     const sonnet45 = listCostModels(db).find((model) => model.modelName === "claude-sonnet-4-5");
@@ -116,6 +118,23 @@ describe("cost model defaults", () => {
       outputCostPerMtok: 25,
       cacheReadCostPerMtok: 0.5,
       cacheCreateCostPerMtok: 6.25,
+    });
+
+    const fable5 = listCostModels(db).find((model) => model.modelName === "claude-fable-5");
+    expect(fable5).toMatchObject({
+      inputCostPerMtok: 10,
+      outputCostPerMtok: 50,
+      cacheReadCostPerMtok: 1,
+      cacheCreateCostPerMtok: 12.5,
+    });
+
+    // Introductory pricing through 2026-08-31 — see DEFAULT_COST_MODELS.
+    const sonnet5 = listCostModels(db).find((model) => model.modelName === "claude-sonnet-5");
+    expect(sonnet5).toMatchObject({
+      inputCostPerMtok: 2,
+      outputCostPerMtok: 10,
+      cacheReadCostPerMtok: 0.2,
+      cacheCreateCostPerMtok: 2.5,
     });
 
     const haiku3 = listCostModels(db).find((model) => model.modelName === "claude-haiku-3");
@@ -139,6 +158,9 @@ describe("cost model defaults", () => {
       "gpt-5.4-nano",
       "gpt-5.4-pro",
       "gpt-5.5",
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
     ]);
 
     const codex = listCostModels(db).find((model) => model.modelName === "gpt-5.3-codex");
@@ -153,6 +175,14 @@ describe("cost model defaults", () => {
       inputCostPerMtok: 5,
       outputCostPerMtok: 30,
       cacheReadCostPerMtok: 0.5,
+    });
+
+    const gpt56Sol = listCostModels(db).find((model) => model.modelName === "gpt-5.6-sol");
+    expect(gpt56Sol).toMatchObject({
+      inputCostPerMtok: 5,
+      outputCostPerMtok: 30,
+      cacheReadCostPerMtok: 0.5,
+      cacheCreateCostPerMtok: 6.25,
     });
   });
 
@@ -231,7 +261,7 @@ describe("cost model defaults", () => {
 
     const result = syncDefaultCostModels(db);
 
-    expect(result).toEqual({ inserted: 4, updated: 0, removed: 2 });
+    expect(result).toEqual({ inserted: 7, updated: 0, removed: 2 });
     expect(
       listCostModels(db)
         .filter((model) => model.provider === "openai")
@@ -243,6 +273,9 @@ describe("cost model defaults", () => {
       "gpt-5.4-nano",
       "gpt-5.4-pro",
       "gpt-5.5",
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
     ]);
   });
 
@@ -258,7 +291,7 @@ describe("cost model defaults", () => {
 
     const result = syncDefaultCostModels(db);
 
-    expect(result).toEqual({ inserted: 6, updated: 0, removed: 0 });
+    expect(result).toEqual({ inserted: 9, updated: 0, removed: 0 });
     expect(
       listCostModels(db).some(
         (model) =>
@@ -567,6 +600,79 @@ describe("cost model defaults", () => {
         candidateSessionIds: ["telemetry-a", "telemetry-b"],
       },
     ]);
+  });
+
+  it("refuses attribution repairs that would duplicate a target source identity", () => {
+    const sourceTicketId = seedTicket("ticket-source");
+    const targetTicketId = seedTicket("ticket-target");
+    seedTelemetrySession(
+      "telemetry-source",
+      sourceTicketId,
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:01:00.000Z"
+    );
+    seedTelemetrySession(
+      "telemetry-target",
+      targetTicketId,
+      "2026-01-01T00:02:00.000Z",
+      "2026-01-01T00:03:00.000Z"
+    );
+
+    recordUsage(db, {
+      telemetrySessionId: "telemetry-target",
+      ticketId: targetTicketId,
+      model: "claude-sonnet-4",
+      inputTokens: 100,
+      outputTokens: 10,
+      source: "claude-jsonl-backfill",
+      sourceRef: "/duplicates/transcript.jsonl",
+      providerEventStart: "2026-01-01T00:02:05.000Z",
+      providerEventEnd: "2026-01-01T00:02:10.000Z",
+      recordedAt: "2026-01-01T00:04:00.000Z",
+    });
+    recordUsage(db, {
+      telemetrySessionId: "telemetry-source",
+      ticketId: sourceTicketId,
+      model: "claude-sonnet-4",
+      inputTokens: 200,
+      outputTokens: 20,
+      source: "claude-jsonl-backfill",
+      sourceRef: "/duplicates/transcript.jsonl",
+      providerEventStart: "2026-01-01T00:02:20.000Z",
+      providerEventEnd: "2026-01-01T00:02:30.000Z",
+      recordedAt: "2026-01-01T00:04:01.000Z",
+    });
+
+    const dryRun = repairTokenUsageAttribution(db);
+
+    expect(dryRun.proposedMoves).toHaveLength(0);
+    expect(dryRun.refusedRows).toEqual([
+      expect.objectContaining({
+        sourceRef: "/duplicates/transcript.jsonl",
+        model: "claude-sonnet-4",
+        reason: "target-duplicate-source",
+        candidateSessionIds: ["telemetry-target"],
+      }),
+    ]);
+
+    const applied = repairTokenUsageAttribution(db, { apply: true });
+
+    expect(applied.appliedMoves).toBe(0);
+    expect(applied.refusedRows).toEqual([
+      expect.objectContaining({
+        reason: "target-duplicate-source",
+        candidateSessionIds: ["telemetry-target"],
+      }),
+    ]);
+    expect(
+      db
+        .prepare(
+          `SELECT telemetry_session_id as telemetrySessionId
+           FROM token_usage
+           WHERE source_ref = ? AND input_tokens = ?`
+        )
+        .get("/duplicates/transcript.jsonl", 200)
+    ).toEqual({ telemetrySessionId: "telemetry-source" });
   });
 });
 

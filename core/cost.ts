@@ -162,6 +162,15 @@ const DEFAULT_COST_MODELS: DefaultCostModelDefinition[] = [
   // Anthropic
   {
     provider: "anthropic",
+    modelName: "claude-fable-5",
+    inputCostPerMtok: 10,
+    outputCostPerMtok: 50,
+    cacheReadCostPerMtok: 1,
+    cacheCreateCostPerMtok: 12.5,
+    isDefault: true,
+  },
+  {
+    provider: "anthropic",
     modelName: "claude-opus-4-6",
     inputCostPerMtok: 5,
     outputCostPerMtok: 25,
@@ -221,6 +230,18 @@ const DEFAULT_COST_MODELS: DefaultCostModelDefinition[] = [
     outputCostPerMtok: 75,
     cacheReadCostPerMtok: 1.5,
     cacheCreateCostPerMtok: 18.75,
+    isDefault: true,
+  },
+  // Introductory pricing ($2/$10) runs through 2026-08-31; standard pricing is
+  // $3/$15 (cache read 0.3, 5m cache write 3.75) from 2026-09-01. Bump via
+  // /update-model-pricing after the switchover.
+  {
+    provider: "anthropic",
+    modelName: "claude-sonnet-5",
+    inputCostPerMtok: 2,
+    outputCostPerMtok: 10,
+    cacheReadCostPerMtok: 0.2,
+    cacheCreateCostPerMtok: 2.5,
     isDefault: true,
   },
   {
@@ -332,6 +353,35 @@ const DEFAULT_COST_MODELS: DefaultCostModelDefinition[] = [
     inputCostPerMtok: 5,
     outputCostPerMtok: 30,
     cacheReadCostPerMtok: 0.5,
+    isDefault: true,
+  },
+  // GPT-5.6 bills cache writes at 1.25x uncached input; cache reads keep the
+  // 90% cached-input discount.
+  {
+    provider: "openai",
+    modelName: "gpt-5.6-sol",
+    inputCostPerMtok: 5,
+    outputCostPerMtok: 30,
+    cacheReadCostPerMtok: 0.5,
+    cacheCreateCostPerMtok: 6.25,
+    isDefault: true,
+  },
+  {
+    provider: "openai",
+    modelName: "gpt-5.6-terra",
+    inputCostPerMtok: 2.5,
+    outputCostPerMtok: 15,
+    cacheReadCostPerMtok: 0.25,
+    cacheCreateCostPerMtok: 3.125,
+    isDefault: true,
+  },
+  {
+    provider: "openai",
+    modelName: "gpt-5.6-luna",
+    inputCostPerMtok: 1,
+    outputCostPerMtok: 6,
+    cacheReadCostPerMtok: 0.1,
+    cacheCreateCostPerMtok: 1.25,
     isDefault: true,
   },
   // Pi exposes Codex subscription-routed models under openai-codex. These are
@@ -1479,7 +1529,11 @@ export interface TokenUsageAttributionRepairRefusal {
   tokenUsageId: string;
   sourceRef: string | null;
   model: string;
-  reason: "missing-source-metadata" | "no-matching-session" | "ambiguous-match";
+  reason:
+    | "missing-source-metadata"
+    | "no-matching-session"
+    | "ambiguous-match"
+    | "target-duplicate-source";
   candidateSessionIds: string[];
 }
 
@@ -1680,6 +1734,14 @@ function splitDistinctList(value: string | null): string[] {
   return value.split(",").filter(Boolean);
 }
 
+function tokenUsageSourceIdentityKey(
+  telemetrySessionId: string,
+  sourceRef: string,
+  model: string
+): string {
+  return `${telemetrySessionId}\0${sourceRef}\0${model}`;
+}
+
 export function getCostAttributionDiagnostics(db: DbHandle): CostAttributionDiagnosticsResult {
   const sessionsWithTelemetryNoTokenUsage = db
     .prepare(
@@ -1816,6 +1878,31 @@ export function repairTokenUsageAttribution(
   const candidateCache = new Map<string, RepairCandidateSession[]>();
   const proposedMoves: TokenUsageAttributionRepairProposal[] = [];
   const refusedRows: TokenUsageAttributionRepairRefusal[] = [];
+  const occupiedSourceIdentities = new Map<string, string>();
+  const existingSourceIdentities = db
+    .prepare(
+      `SELECT id, telemetry_session_id, source_ref, model
+       FROM token_usage
+       WHERE telemetry_session_id IS NOT NULL
+         AND source_ref IS NOT NULL`
+    )
+    .all() as Array<{
+    id: string;
+    telemetry_session_id: string;
+    source_ref: string;
+    model: string;
+  }>;
+
+  for (const existing of existingSourceIdentities) {
+    occupiedSourceIdentities.set(
+      tokenUsageSourceIdentityKey(
+        existing.telemetry_session_id,
+        existing.source_ref,
+        existing.model
+      ),
+      existing.id
+    );
+  }
 
   for (const row of rows) {
     const usageWindow = repairWindow(row.provider_event_start, row.provider_event_end);
@@ -1897,6 +1984,23 @@ export function repairTokenUsageAttribution(
 
     if (best.candidate.telemetrySessionId === row.telemetry_session_id) continue;
 
+    const targetSourceIdentityKey = tokenUsageSourceIdentityKey(
+      best.candidate.telemetrySessionId,
+      row.source_ref,
+      row.model
+    );
+    const conflictingTokenUsageId = occupiedSourceIdentities.get(targetSourceIdentityKey);
+    if (conflictingTokenUsageId && conflictingTokenUsageId !== row.id) {
+      refusedRows.push({
+        tokenUsageId: row.id,
+        sourceRef: row.source_ref,
+        model: row.model,
+        reason: "target-duplicate-source",
+        candidateSessionIds: [best.candidate.telemetrySessionId],
+      });
+      continue;
+    }
+
     proposedMoves.push({
       tokenUsageId: row.id,
       sourceRef: row.source_ref,
@@ -1909,6 +2013,13 @@ export function repairTokenUsageAttribution(
       overlapMs: best.overlapMs,
       reason: "provider event window overlaps exactly one telemetry session in the same project",
     });
+
+    if (row.telemetry_session_id) {
+      occupiedSourceIdentities.delete(
+        tokenUsageSourceIdentityKey(row.telemetry_session_id, row.source_ref, row.model)
+      );
+    }
+    occupiedSourceIdentities.set(targetSourceIdentityKey, row.id);
   }
 
   let appliedMoves = 0;
